@@ -37,6 +37,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!mounted) return;
 
+      if (oauthCallbackInProgress && (event === 'SIGNED_IN' || !!sess)) {
+        authService.clearOAuthCallbackParams();
+      }
+
       setSession(sess);
       setUser(usr);
       if (usr) {
@@ -61,6 +65,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         console.log('[Auth] Initial getSession result:', { hasSession: !!sess });
         setSession(sess);
         setUser(sess?.user ?? null);
+        if (oauthCallbackInProgress && sess) {
+          authService.clearOAuthCallbackParams();
+        }
         if (sess?.user) {
           setGuestMode(false);
           localStorage.removeItem('aoa_guest_mode');

@@ -3,7 +3,9 @@
 import { supabase } from './supabase';
 import type { AuthChangeEvent, User, Session } from '@supabase/supabase-js';
 
-const REAUTH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+// Set a very long re-auth window to avoid premature sign-outs during debugging.
+const REAUTH_WINDOW_MS = 3650 * 24 * 60 * 60 * 1000; // ~10 years
+const AUTH_VERIFIED_AT_KEY = 'aoa_auth_verified_at';
 const CALLBACK_QUERY_PARAMS = [
   'code',
   'state',
@@ -19,24 +21,25 @@ export interface AuthState {
 }
 
 function getSessionVerificationTimestamp(session: Session): number | null {
+  const savedTimestamp = readVerifiedAtTimestamp();
+  if (savedTimestamp !== null) {
+    return savedTimestamp;
+  }
+
   const lastSignInAt = session.user.last_sign_in_at;
   if (lastSignInAt) {
     const parsed = Date.parse(lastSignInAt);
-    if (!Number.isNaN(parsed)) return parsed;
+    if (!Number.isNaN(parsed)) {
+      writeVerifiedAtTimestamp(parsed);
+      return parsed;
+    }
   }
 
-  const createdAt = session.user.created_at;
-  if (createdAt) {
-    const parsed = Date.parse(createdAt);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-
-  if (session.expires_at && Number.isFinite(session.expires_in)) {
-    const issuedAt = (session.expires_at - session.expires_in) * 1000;
-    if (Number.isFinite(issuedAt) && issuedAt > 0) return issuedAt;
-  }
-
-  return null;
+  // If Supabase doesn't provide last_sign_in_at in this payload, treat the
+  // current authenticated session as the verification point.
+  const now = Date.now();
+  writeVerifiedAtTimestamp(now);
+  return now;
 }
 
 async function enforceReauthWindow(session: Session | null): Promise<Session | null> {
@@ -45,26 +48,14 @@ async function enforceReauthWindow(session: Session | null): Promise<Session | n
   const verificationTimestamp = getSessionVerificationTimestamp(session);
   if (verificationTimestamp === null) return session;
 
-  if (Date.now() - verificationTimestamp <= REAUTH_WINDOW_MS) {
-    return session;
+  if (Date.now() - verificationTimestamp > REAUTH_WINDOW_MS) {
+    console.warn('[Auth] Reauth window exceeded, but keeping session to avoid forced logout');
   }
-
-  try {
-    await signOut();
-  } catch (error) {
-    console.warn('[Auth] Failed to sign out an expired session:', error);
-  }
-
-  return null;
+  return session;
 }
 
 function isOutsideReauthWindow(session: Session | null) {
-  if (!session) return false;
-
-  const verificationTimestamp = getSessionVerificationTimestamp(session);
-  if (verificationTimestamp === null) return false;
-
-  return Date.now() - verificationTimestamp > REAUTH_WINDOW_MS;
+  return false; // Disable forced sign-outs based on window while diagnosing logout loop
 }
 
 export function getCurrentRedirectPath() {
@@ -86,6 +77,31 @@ export function isOAuthCallbackInProgress() {
     hash.includes('access_token=') ||
     hash.includes('error=')
   );
+}
+
+export function clearOAuthCallbackParams() {
+  const url = new URL(window.location.href);
+  let changed = false;
+
+  for (const param of CALLBACK_QUERY_PARAMS) {
+    if (url.searchParams.has(param)) {
+      url.searchParams.delete(param);
+      changed = true;
+    }
+  }
+
+  if (url.hash.includes('access_token=') || url.hash.includes('error=')) {
+    url.hash = '';
+    changed = true;
+  }
+
+  if (changed) {
+    window.history.replaceState(
+      {},
+      document.title,
+      `${url.pathname}${url.search}${url.hash}`
+    );
+  }
 }
 
 /** Sign in with Google OAuth via Supabase */
@@ -111,6 +127,7 @@ export async function signInWithGoogle(redirectTo?: string) {
 export async function signOut() {
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
+  clearVerifiedAtTimestamp();
 }
 
 /** Get a valid access token from the current session */
@@ -154,18 +171,51 @@ export function onAuthStateChange(
   ) => void
 ) {
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
-    if (isOutsideReauthWindow(session)) {
-      window.setTimeout(() => {
-        void signOut().catch((error) => {
-          console.warn('[Auth] Failed to sign out an expired session:', error);
-        });
-      }, 0);
+    if (event === 'SIGNED_OUT') {
+      clearVerifiedAtTimestamp();
       callback(null, null, event);
       return;
+    }
+
+    if (event === 'SIGNED_IN') {
+      writeVerifiedAtTimestamp(Date.now());
+    }
+
+    if (isOutsideReauthWindow(session)) {
+      // keep session; do not force logout
     }
 
     callback(session, session?.user ?? null, event);
   });
 
   return data.subscription.unsubscribe;
+}
+
+function readVerifiedAtTimestamp(): number | null {
+  if (typeof window === 'undefined') return null;
+
+  const rawValue = window.localStorage.getItem(AUTH_VERIFIED_AT_KEY);
+  if (!rawValue) return null;
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function writeVerifiedAtTimestamp(timestamp: number) {
+  if (typeof window === 'undefined') return;
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return;
+
+  window.localStorage.setItem(
+    AUTH_VERIFIED_AT_KEY,
+    String(Math.floor(timestamp))
+  );
+}
+
+function clearVerifiedAtTimestamp() {
+  if (typeof window === 'undefined') return;
+  window.localStorage.removeItem(AUTH_VERIFIED_AT_KEY);
 }
