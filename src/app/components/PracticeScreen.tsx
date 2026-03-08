@@ -6,14 +6,14 @@ import { useTheme } from "./ThemeContext";
 import { usePurchase } from "../contexts/PurchaseContext";
 import { useNavigate } from "react-router";
 
-import imgVocabulary from "/assets/2ba30e58edf3ccfda41166fc36258ccf3f4f76f1.png";
-import imgSynonyms from "/assets/9eeab26df9b6053fe15b3fcf6e6f40f05ad27222.png";
-import imgAntonyms from "/assets/e500e6d028446226a1ca5f40b2b0d1db3205632a.png";
-import imgDefinitions from "/assets/29c5bab39e327da86422f103678424e250ff4c3c.png";
-import imgSpelling from "/assets/c2f739072cd19db867b3eb6e0f3b094ee3fac434.png";
-import imgContext from "/assets/2a1d8de142392ff5f1bdf9eb56bf6963c7e673bc.png";
-import imgWordRoots from "/assets/8049752b65600b9fb880a096268ba27881ca9d1d.png";
-import imgIdioms from "/assets/53c04639ad24021b57ffca2fbbd4b35fd5ce4238.png";
+import imgVocabulary from "../../assets/2ba30e58edf3ccfda41166fc36258ccf3f4f76f1.png";
+import imgSynonyms from "../../assets/9eeab26df9b6053fe15b3fcf6e6f40f05ad27222.png";
+import imgAntonyms from "../../assets/e500e6d028446226a1ca5f40b2b0d1db3205632a.png";
+import imgDefinitions from "../../assets/29c5bab39e327da86422f103678424e250ff4c3c.png";
+import imgSpelling from "../../assets/c2f739072cd19db867b3eb6e0f3b094ee3fac434.png";
+import imgContext from "../../assets/2a1d8de142392ff5f1bdf9eb56bf6963c7e673bc.png";
+import imgWordRoots from "../../assets/8049752b65600b9fb880a096268ba27881ca9d1d.png";
+import imgIdioms from "../../assets/53c04639ad24021b57ffca2fbbd4b35fd5ce4238.png";
 
 type PracticeState = "menu" | "quiz" | "result";
 type DifficultyLevel = "easy" | "medium" | "hard";
