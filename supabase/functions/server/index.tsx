@@ -1,8 +1,9 @@
-import { Hono } from "npm:hono";
-import { cors } from "npm:hono/cors";
-import { logger } from "npm:hono/logger";
-import { createClient } from "npm:@supabase/supabase-js@2";
-import * as kv from "./kv_store.tsx";
+/// <reference path="../types/deno.d.ts" />
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { logger } from "hono/logger";
+import { createClient } from "@supabase/supabase-js";
+import * as kv from "./kv_store";
 
 const app = new Hono();
 
@@ -23,10 +24,12 @@ app.use(
 
 // Helper: get Supabase admin client
 function getAdminClient() {
-  return createClient(
-    Deno.env.get("SUPABASE_URL")!,
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-  );
+  const url = Deno.env.get("SUPABASE_URL");
+  const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!url || !key) {
+    throw new Error("Missing required environment variables: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  return createClient(url, key);
 }
 
 // Helper: extract and verify user from access token
@@ -88,12 +91,12 @@ async function generateOrderToken(orderId: string, userId: string): Promise<stri
 // ─── Existing routes ─────────────────────────────────────────────────
 
 // Health check
-app.get("/make-server-205d64da/health", (c) => {
+app.get("/make-server-205d64da/health", (c: any) => {
   return c.json({ status: "ok" });
 });
 
 // Signup route (email/password — for future use)
-app.post("/make-server-205d64da/signup", async (c) => {
+app.post("/make-server-205d64da/signup", async (c: any) => {
   try {
     const { email, password, name } = await c.req.json();
     if (!email || !password) {
@@ -118,7 +121,7 @@ app.post("/make-server-205d64da/signup", async (c) => {
 });
 
 // Get user profile (protected)
-app.get("/make-server-205d64da/profile", async (c) => {
+app.get("/make-server-205d64da/profile", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -139,7 +142,7 @@ app.get("/make-server-205d64da/profile", async (c) => {
 });
 
 // Save user preferences (protected)
-app.post("/make-server-205d64da/profile/preferences", async (c) => {
+app.post("/make-server-205d64da/profile/preferences", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -157,7 +160,7 @@ app.post("/make-server-205d64da/profile/preferences", async (c) => {
 // ─── SBP Payment Routes ─────────────────────────────────────────────
 
 // POST /orders/create — create a new SBP payment order
-app.post("/make-server-205d64da/orders/create", async (c) => {
+app.post("/make-server-205d64da/orders/create", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -237,7 +240,7 @@ app.post("/make-server-205d64da/orders/create", async (c) => {
 });
 
 // GET /orders/:id — get order status (protected)
-app.get("/make-server-205d64da/orders/:id", async (c) => {
+app.get("/make-server-205d64da/orders/:id", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -281,7 +284,7 @@ app.get("/make-server-205d64da/orders/:id", async (c) => {
 });
 
 // POST /orders/:id/confirm — user confirms they've made the SBP payment
-app.post("/make-server-205d64da/orders/:id/confirm", async (c) => {
+app.post("/make-server-205d64da/orders/:id/confirm", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -366,7 +369,7 @@ app.post("/make-server-205d64da/orders/:id/confirm", async (c) => {
 });
 
 // GET /subscription — get user's active subscription (protected)
-app.get("/make-server-205d64da/subscription", async (c) => {
+app.get("/make-server-205d64da/subscription", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {
@@ -392,7 +395,7 @@ app.get("/make-server-205d64da/subscription", async (c) => {
 });
 
 // GET /orders/user/history — get user's order history (protected)
-app.get("/make-server-205d64da/orders/user/history", async (c) => {
+app.get("/make-server-205d64da/orders/user/history", async (c: any) => {
   try {
     const user = await getAuthUser(c.req.raw);
     if (!user) {

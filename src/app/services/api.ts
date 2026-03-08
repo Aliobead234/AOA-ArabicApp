@@ -1,6 +1,6 @@
 // API service - all server calls go through here
 // Easy to swap base URL when migrating to Go + Railway
-import { projectId, publicAnonKey } from '/utils/supabase/info';
+import { projectId } from '../../utils/supabase/info';
 import * as authService from './auth';
 
 const BASE_URL = `https://${projectId}.supabase.co/functions/v1/make-server-205d64da`;
@@ -27,14 +27,16 @@ export async function apiRequest<T = unknown>(
       body: body ? JSON.stringify(body) : undefined,
     });
 
-  let bearerToken =
-    accessToken ?? (await authService.getAccessToken()) ?? publicAnonKey;
+  let bearerToken = accessToken ?? (await authService.getAccessToken());
+  if (!bearerToken) {
+    throw new Error('Session expired or invalid. Please sign in again.');
+  }
 
   let res = await send(bearerToken);
 
-  if (res.status === 401 && accessToken) {
+  if (res.status === 401) {
     const refreshedToken = await authService.refreshAccessToken();
-    if (refreshedToken && refreshedToken !== bearerToken) {
+    if (refreshedToken) {
       bearerToken = refreshedToken;
       res = await send(bearerToken);
     }
@@ -42,12 +44,45 @@ export async function apiRequest<T = unknown>(
 
   if (!res.ok) {
     const errorText = await res.text();
-    console.error(`API error [${res.status}] ${path}:`, errorText);
-    if (res.status === 401 && /invalid jwt/i.test(errorText)) {
+    const errorMessage = extractApiErrorMessage(errorText);
+    console.error(`API error [${res.status}] ${path}:`, errorMessage || errorText);
+    if (res.status === 401 && isAuthErrorMessage(errorMessage)) {
       throw new Error('Session expired or invalid. Please sign in again.');
     }
-    throw new Error(errorText || `Request failed: ${res.status}`);
+    if (res.status === 503) {
+      throw new Error('Payment service is temporarily unavailable. Please try again in a minute.');
+    }
+    throw new Error(errorMessage || `Request failed: ${res.status}`);
   }
 
   return res.json() as Promise<T>;
+}
+
+function extractApiErrorMessage(rawBody: string): string {
+  const trimmed = rawBody.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as { error?: string; message?: string };
+    const message = parsed.error ?? parsed.message;
+    if (typeof message === 'string' && message.trim()) {
+      return message.trim();
+    }
+  } catch {
+    // Non-JSON response.
+  }
+
+  return trimmed;
+}
+
+function isAuthErrorMessage(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('invalid jwt') ||
+    normalized.includes('invalid auth token') ||
+    normalized.includes('auth token expired') ||
+    normalized.includes('invalid or expired auth token')
+  );
 }

@@ -1,4 +1,4 @@
 // Supabase project credentials
 // Replace these with your actual Supabase project details
-export const projectId = 'your-project-id'; // e.g., 'abcdefgh123456'
-export const publicAnonKey = 'your-anon-key'; // e.g., 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...';
+export const projectId = 'xmhqgwrwezonofhvukpp';
+export const publicAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhtaHFnd3J3ZXpvbm9maHZ1a3BwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI3MDg1NDEsImV4cCI6MjA4ODI4NDU0MX0.r3AT-VgxMz-9x7km0N7gvlYPBv-eaI37--F8Ykd9Pgk';

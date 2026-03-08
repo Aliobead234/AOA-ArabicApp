@@ -20,4 +20,10 @@
   - `VITE_PAYMENT_BACKEND_MODE=supabase|microservice|hybrid`
   - `VITE_PAYMENT_MICRO_BASE_URL=http://localhost:8080`
   - `VITE_PAYMENT_MICRO_TIMEOUT_MS=8000`
+
+  For stable rollout, start with:
+
+  - `VITE_PAYMENT_BACKEND_MODE=hybrid`
+
+  This uses the Go microservice first and falls back to Supabase payment endpoints if microservice is unavailable.
   

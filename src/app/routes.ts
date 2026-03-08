@@ -1,4 +1,4 @@
-import { createBrowserRouter } from "react-router";
+import { createBrowserRouter, redirect } from "react-router";
 import { RootLayout } from "./components/RootLayout";
 import { Layout } from "./components/Layout";
 import { FlashcardScreen } from "./components/FlashcardScreen";
@@ -31,6 +31,7 @@ export const router = createBrowserRouter([
           { path: "payments", Component: PaymentsPage },
           { path: "profile", Component: ProfileScreen },
           { path: "stats", Component: WordStatsScreen },
+          { path: "oauth/consent", loader: () => redirect("/") },
           { path: "explore", Component: ExploreScreen },
           { path: "your-words", Component: YourWordsScreen },
         ],

@@ -6,6 +6,7 @@ import type { AuthChangeEvent, User, Session } from '@supabase/supabase-js';
 // Set a very long re-auth window to avoid premature sign-outs during debugging.
 const REAUTH_WINDOW_MS = 3650 * 24 * 60 * 60 * 1000; // ~10 years
 const AUTH_VERIFIED_AT_KEY = 'aoa_auth_verified_at';
+const TOKEN_REFRESH_SKEW_MS = 60 * 1000;
 const CALLBACK_QUERY_PARAMS = [
   'code',
   'state',
@@ -13,12 +14,17 @@ const CALLBACK_QUERY_PARAMS = [
   'error_code',
   'error_description',
 ];
+const INTERNAL_OAUTH_PATHS = new Set(['/oauth/consent']);
+
+let refreshSessionPromise: Promise<Session | null> | null = null;
 
 export interface AuthState {
   user: User | null;
   session: Session | null;
   loading: boolean;
 }
+
+export type AppAuthChangeEvent = AuthChangeEvent | 'SIGNED_OUT';
 
 function getSessionVerificationTimestamp(session: Session): number | null {
   const savedTimestamp = readVerifiedAtTimestamp();
@@ -64,7 +70,8 @@ export function getCurrentRedirectPath() {
     url.searchParams.delete(param);
   }
 
-  return `${url.pathname}${url.search}${url.hash}`;
+  const normalizedPath = normalizeAuthPath(url.pathname);
+  return `${normalizedPath}${url.search}${url.hash}`;
 }
 
 export function isOAuthCallbackInProgress() {
@@ -96,10 +103,11 @@ export function clearOAuthCallbackParams() {
   }
 
   if (changed) {
+    const normalizedPath = normalizeAuthPath(url.pathname);
     window.history.replaceState(
       {},
       document.title,
-      `${url.pathname}${url.search}${url.hash}`
+      `${normalizedPath}${url.search}${url.hash}`
     );
   }
 }
@@ -133,18 +141,22 @@ export async function signOut() {
 /** Get a valid access token from the current session */
 export async function getAccessToken() {
   const session = await getSession();
-  return session?.access_token ?? null;
+  if (!session) {
+    return null;
+  }
+
+  if (!isSessionExpiring(session)) {
+    return session.access_token;
+  }
+
+  const refreshed = await forceRefreshSession();
+  return refreshed?.access_token ?? session.access_token ?? null;
 }
 
 /** Refresh access token and return the new token if available */
 export async function refreshAccessToken() {
-  const { data, error } = await supabase.auth.refreshSession();
-  if (error) {
-    return null;
-  }
-
-  const validSession = await enforceReauthWindow(data.session);
-  return validSession?.access_token ?? null;
+  const session = await forceRefreshSession();
+  return session?.access_token ?? null;
 }
 
 /** Get the current session (for returning users) */
@@ -152,7 +164,13 @@ export async function getSession() {
   const { data, error } = await supabase.auth.getSession();
   if (error) throw error;
 
-  return enforceReauthWindow(data.session);
+  const session = await enforceReauthWindow(data.session);
+  if (session) {
+    return session;
+  }
+
+  // Recover from transient null-session windows during token rotation.
+  return forceRefreshSession();
 }
 
 /** Get the current user */
@@ -167,25 +185,38 @@ export function onAuthStateChange(
   callback: (
     session: Session | null,
     user: User | null,
-    event: AuthChangeEvent
+    event: AppAuthChangeEvent
   ) => void
 ) {
   const { data } = supabase.auth.onAuthStateChange((event, session) => {
-    if (event === 'SIGNED_OUT') {
-      clearVerifiedAtTimestamp();
-      callback(null, null, event);
-      return;
-    }
+    void (async () => {
+      const eventName = event as AppAuthChangeEvent;
 
-    if (event === 'SIGNED_IN') {
-      writeVerifiedAtTimestamp(Date.now());
-    }
+      if (eventName === 'SIGNED_OUT') {
+        // Supabase can emit transient SIGNED_OUT during refresh edge-cases.
+        // Re-check session once before forcing logout in UI.
+        const { data: current } = await supabase.auth.getSession();
+        const recoveredSession = current.session ?? (await forceRefreshSession());
+        if (recoveredSession?.user) {
+          callback(recoveredSession, recoveredSession.user, 'TOKEN_REFRESHED');
+          return;
+        }
 
-    if (isOutsideReauthWindow(session)) {
-      // keep session; do not force logout
-    }
+        clearVerifiedAtTimestamp();
+        callback(null, null, eventName);
+        return;
+      }
 
-    callback(session, session?.user ?? null, event);
+      if (eventName === 'SIGNED_IN') {
+        writeVerifiedAtTimestamp(Date.now());
+      }
+
+      if (isOutsideReauthWindow(session)) {
+        // keep session; do not force logout
+      }
+
+      callback(session, session?.user ?? null, eventName);
+    })();
   });
 
   return data.subscription.unsubscribe;
@@ -218,4 +249,95 @@ function writeVerifiedAtTimestamp(timestamp: number) {
 function clearVerifiedAtTimestamp() {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(AUTH_VERIFIED_AT_KEY);
+}
+
+async function ensureFreshSession(session: Session | null): Promise<Session | null> {
+  const validSession = await enforceReauthWindow(session);
+  if (!validSession) {
+    return null;
+  }
+
+  if (!isSessionExpiring(validSession)) {
+    return validSession;
+  }
+
+  const refreshedSession = await forceRefreshSession();
+  return refreshedSession ?? null;
+}
+
+function isSessionExpiring(session: Session): boolean {
+  const expiresAtMs = getSessionExpiryMs(session);
+  if (expiresAtMs === null) {
+    return false;
+  }
+
+  return expiresAtMs - Date.now() <= TOKEN_REFRESH_SKEW_MS;
+}
+
+function getSessionExpiryMs(session: Session): number | null {
+  if (typeof session.expires_at === 'number' && Number.isFinite(session.expires_at)) {
+    return session.expires_at * 1000;
+  }
+
+  return getJwtExpiryMs(session.access_token);
+}
+
+function getJwtExpiryMs(token: string | null | undefined): number | null {
+  if (!token) {
+    return null;
+  }
+
+  const segments = token.split('.');
+  if (segments.length < 2) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(base64UrlDecode(segments[1])) as { exp?: number };
+    if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)) {
+      return null;
+    }
+    return payload.exp * 1000;
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlDecode(value: string): string {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '=');
+
+  if (typeof window !== 'undefined' && typeof window.atob === 'function') {
+    const binary = window.atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  }
+
+  return atob(padded);
+}
+
+async function forceRefreshSession(): Promise<Session | null> {
+  if (!refreshSessionPromise) {
+    refreshSessionPromise = (async () => {
+      const { data, error } = await supabase.auth.refreshSession();
+      if (error) {
+        console.error('[Auth] Failed to refresh session:', error);
+        return null;
+      }
+
+      return enforceReauthWindow(data.session);
+    })().finally(() => {
+      refreshSessionPromise = null;
+    });
+  }
+
+  return refreshSessionPromise;
+}
+
+function normalizeAuthPath(pathname: string): string {
+  const withSingleLeadingSlash = `/${pathname.replace(/^\/+/, '')}`;
+  if (INTERNAL_OAUTH_PATHS.has(withSingleLeadingSlash)) {
+    return '/';
+  }
+  return withSingleLeadingSlash || '/';
 }

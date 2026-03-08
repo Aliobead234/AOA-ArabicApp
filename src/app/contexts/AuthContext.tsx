@@ -37,6 +37,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!mounted) return;
 
+      if (event === 'SIGNED_OUT') {
+        void (async () => {
+          const recoveredSession = await authService.getSession().catch(() => null);
+          if (!mounted) return;
+          if (recoveredSession?.user) {
+            setSession(recoveredSession);
+            setUser(recoveredSession.user);
+            setLoading(false);
+            return;
+          }
+
+          // Ignore transient SIGNED_OUT events emitted during token refresh
+          // edge-cases. Explicit sign-out still clears local state via
+          // handleSignOut().
+          setLoading(false);
+        })();
+        return;
+      }
+
+      // Supabase can briefly emit non-SIGNED_OUT events without a resolved
+      // session during token refresh. Ignore those so checkout does not bounce
+      // the user back to the login screen mid-flow.
+      if (!sess) {
+        setLoading(false);
+        return;
+      }
+
       if (oauthCallbackInProgress && (event === 'SIGNED_IN' || !!sess)) {
         authService.clearOAuthCallbackParams();
       }

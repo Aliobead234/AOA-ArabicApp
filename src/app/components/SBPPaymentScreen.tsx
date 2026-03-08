@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useTheme } from "./ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
 import { usePurchase } from "../contexts/PurchaseContext";
@@ -37,6 +37,11 @@ interface OrderData {
     bankName: string;
     name: string;
   };
+  qrPayload?: string;
+  qrUrl?: string;
+  qrImageUrl?: string;
+  providerOrderId?: string;
+  providerStatus?: string;
   token: string;
 }
 
@@ -61,7 +66,8 @@ export function SBPPaymentScreen({
   onSuccess,
 }: SBPPaymentScreenProps) {
   const { colors, isDark } = useTheme();
-  const { session } = useAuth();
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
   const { refreshSubscription } = usePurchase();
 
   const [order, setOrder] = useState<OrderData | null>(null);
@@ -73,34 +79,60 @@ export function SBPPaymentScreen({
   );
   const [timeLeft, setTimeLeft] = useState<string>("");
   const [pollCount, setPollCount] = useState(0);
+  const createOrderRequestRef = useRef<Promise<void> | null>(null);
+  const createOrderKeyRef = useRef<string | null>(null);
+  const confirmInFlightRef = useRef(false);
 
   const accent = isDark ? "#7ec8a9" : "#5aab8b";
 
   // Create order on mount
   useEffect(() => {
+    let cancelled = false;
+    const requestKey = `${userId ?? "guest"}:${planId}`;
+
     async function createOrder() {
-      if (!session?.access_token) {
+      if (!userId) {
         setError("Please sign in to continue");
         setLoading(false);
         return;
       }
+
+      if (createOrderRequestRef.current && createOrderKeyRef.current === requestKey) {
+        return createOrderRequestRef.current;
+      }
+
       try {
+        createOrderKeyRef.current = requestKey;
         setLoading(true);
-        const data = await createSbpOrder(
-          planId,
-          session.access_token,
-        );
-        setOrder(data);
-        setError(null);
+        const run = (async () => {
+          const data = await createSbpOrder(planId);
+          if (cancelled) return;
+          setOrder(data);
+          setError(null);
+        })();
+
+        createOrderRequestRef.current = run.finally(() => {
+          createOrderRequestRef.current = null;
+        });
+
+        await createOrderRequestRef.current;
       } catch (err: any) {
+        if (cancelled) return;
         console.error("Failed to create order:", err);
         setError(err.message || "Failed to create order");
       } finally {
-        setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
+
     createOrder();
-  }, [planId, session?.access_token]);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [planId, userId]);
 
   // Countdown timer
   useEffect(() => {
@@ -128,17 +160,11 @@ export function SBPPaymentScreen({
 
   // Poll for order status after confirming
   useEffect(() => {
-    if (
-      step !== "verifying" ||
-      !order ||
-      !session?.access_token
-    )
-      return;
+    if (step !== "verifying" || !order) return;
     const interval = setInterval(async () => {
       try {
         const data = await getSbpOrder(
           order.orderId,
-          session.access_token,
         );
         if (data.status === "confirmed") {
           setStep("success");
@@ -158,10 +184,20 @@ export function SBPPaymentScreen({
         setPollCount((c) => c + 1);
       } catch (err) {
         console.error("Poll error:", err);
+        const message =
+          err instanceof Error ? err.message.toLowerCase() : "";
+        if (
+          message.includes("session expired") ||
+          message.includes("invalid auth token")
+        ) {
+          setError("Session expired or invalid. Please sign in again.");
+          setStep("error");
+          clearInterval(interval);
+        }
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [step, order, session?.access_token, refreshSubscription]);
+  }, [step, order, refreshSubscription]);
 
   const handleCopy = useCallback(
     async (text: string, field: string) => {
@@ -187,19 +223,21 @@ export function SBPPaymentScreen({
   );
 
   const handleConfirmPayment = async () => {
-    if (!order || !session?.access_token) return;
+    if (!order || confirmInFlightRef.current) return;
+    confirmInFlightRef.current = true;
     setStep("confirming");
     try {
       await confirmSbpOrder(
-        order.orderId,
-        order.token,
-        session.access_token,
+          order.orderId,
+          order.token
       );
       setStep("verifying");
     } catch (err: any) {
       console.error("Confirm error:", err);
       setError(err.message || "Confirmation failed");
       setStep("error");
+    } finally {
+      confirmInFlightRef.current = false;
     }
   };
 
@@ -461,6 +499,41 @@ export function SBPPaymentScreen({
             tracked and verified
           </span>
         </motion.div>
+
+        {order.qrImageUrl && (
+          <motion.div
+            initial={{ y: 10, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ delay: 0.08 }}
+            className={`${colors.card} rounded-2xl p-4 mb-4 ${!isDark ? "shadow-sm" : ""}`}
+            style={isDark ? {} : { border: "1px solid #e8e3db" }}
+          >
+            <h3 className={`${colors.text} text-sm font-medium mb-1`}>
+              Pay via SBP QR
+            </h3>
+            <p className={`${colors.textMuted} text-xs mb-3`}>
+              Scan this QR code in your banking app.
+            </p>
+            <div className="flex items-center justify-center rounded-xl p-3 mb-3 bg-white">
+              <img
+                src={order.qrImageUrl}
+                alt="SBP QR code"
+                className="w-52 h-52 object-contain"
+              />
+            </div>
+            {order.qrUrl && (
+              <a
+                href={order.qrUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-xs underline"
+                style={{ color: accent }}
+              >
+                Open payment link
+              </a>
+            )}
+          </motion.div>
+        )}
 
         {/* Payment details */}
         <motion.div

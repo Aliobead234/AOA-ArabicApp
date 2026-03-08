@@ -1,6 +1,5 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 import { useAuth } from './AuthContext';
-import * as authService from '../services/auth';
 import { getCurrentSubscription } from '../services/paymentService';
 
 interface Subscription {
@@ -24,32 +23,48 @@ const PurchaseContext = createContext<PurchaseContextValue | null>(null);
 
 export function PurchaseProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
+  const userId = user?.id ?? null;
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [loading, setLoading] = useState(false);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const lastRefreshAtRef = useRef(0);
 
   const refreshSubscription = useCallback(async () => {
-    if (!user) {
+    if (!userId) {
       setSubscription(null);
+      lastRefreshAtRef.current = 0;
       return;
     }
 
-    const accessToken = await authService.getAccessToken();
-    if (!accessToken) {
-      setSubscription(null);
-      return;
+    if (refreshInFlightRef.current) {
+      return refreshInFlightRef.current;
     }
 
-    try {
-      setLoading(true);
-      const data = await getCurrentSubscription(accessToken);
-      setSubscription(data.subscription?.status === 'active' ? data.subscription : null);
-    } catch (err) {
-      console.error('Failed to fetch subscription:', err);
-      setSubscription(null);
-    } finally {
-      setLoading(false);
+    // Avoid bursts of duplicate subscription checks during rapid auth/UI updates.
+    if (Date.now() - lastRefreshAtRef.current < 1000) {
+      return Promise.resolve();
     }
-  }, [user]);
+
+    const run = (async () => {
+      try {
+        setLoading(true);
+        const data = await getCurrentSubscription();
+        setSubscription(data.subscription?.status === 'active' ? data.subscription : null);
+      } catch (err) {
+        console.error('Failed to fetch subscription:', err);
+        setSubscription(null);
+      } finally {
+        lastRefreshAtRef.current = Date.now();
+        setLoading(false);
+      }
+    })();
+
+    refreshInFlightRef.current = run.finally(() => {
+      refreshInFlightRef.current = null;
+    });
+
+    return refreshInFlightRef.current;
+  }, [userId]);
 
   useEffect(() => {
     refreshSubscription();

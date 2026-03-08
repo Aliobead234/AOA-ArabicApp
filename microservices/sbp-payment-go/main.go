@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +24,8 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/joho/godotenv"
+	"github.com/skip2/go-qrcode"
 )
 
 const (
@@ -26,6 +34,19 @@ const (
 	statusConfirmed            = "confirmed"
 	statusExpired              = "expired"
 	statusRejected             = "rejected"
+)
+
+const (
+	maxSupabaseAuthErrorBodyBytes = 4096
+	supabaseAuthTimeout           = 8 * time.Second
+)
+
+var (
+	errAuthTokenInvalid         = errors.New("auth token invalid")
+	errAuthTokenExpired         = errors.New("auth token expired")
+	errAuthServiceUnavailable   = errors.New("auth service unavailable")
+	errAuthServiceMisconfigured = errors.New("auth service misconfigured")
+	supabaseAuthHTTPClient      = &http.Client{Timeout: supabaseAuthTimeout}
 )
 
 const schemaSQL = `
@@ -40,12 +61,25 @@ CREATE TABLE IF NOT EXISTS payment_orders (
   status TEXT NOT NULL CHECK (status IN ('pending', 'awaiting_verification', 'confirmed', 'expired', 'rejected')),
   verification_token TEXT NOT NULL,
   payment_comment TEXT NOT NULL UNIQUE,
+  qr_payload TEXT NULL,
+  qr_url TEXT NULL,
+  qr_image_url TEXT NULL,
+  provider_order_id TEXT NULL,
+  provider_status TEXT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   expires_at TIMESTAMPTZ NOT NULL,
   confirmed_at TIMESTAMPTZ NULL,
   verified_at TIMESTAMPTZ NULL,
   rejection_reason TEXT NULL
 );
+
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS qr_payload TEXT NULL;
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS qr_url TEXT NULL;
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS qr_image_url TEXT NULL;
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS provider_order_id TEXT NULL;
+ALTER TABLE payment_orders ADD COLUMN IF NOT EXISTS provider_status TEXT NULL;
+ALTER TABLE payment_orders ALTER COLUMN period TYPE TEXT USING period::text;
+ALTER TABLE payment_orders ALTER COLUMN status TYPE TEXT USING status::text;
 
 CREATE INDEX IF NOT EXISTS idx_payment_orders_user ON payment_orders (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders (status, expires_at);
@@ -89,6 +123,11 @@ type Config struct {
 	SBPRecipientPhone    string
 	SBPRecipientBankName string
 	SBPRecipientName     string
+	SBPProviderMode      string
+	SBPProviderCreateURL string
+	SBPProviderAPIKey    string
+	SBPWebhookSecret     string
+	SBPProviderTimeout   time.Duration
 }
 
 type AuthUser struct {
@@ -125,6 +164,11 @@ type OrderResponse struct {
 	ExpiresAt       string    `json:"expiresAt"`
 	PaymentComment  string    `json:"paymentComment"`
 	Recipient       Recipient `json:"recipient"`
+	QRPayload       string    `json:"qrPayload,omitempty"`
+	QRURL           string    `json:"qrUrl,omitempty"`
+	QRImageURL      string    `json:"qrImageUrl,omitempty"`
+	ProviderOrderID string    `json:"providerOrderId,omitempty"`
+	ProviderStatus  string    `json:"providerStatus,omitempty"`
 	Token           string    `json:"token,omitempty"`
 	CreatedAt       *string   `json:"createdAt,omitempty"`
 	ConfirmedAt     *string   `json:"confirmedAt,omitempty"`
@@ -143,6 +187,11 @@ type dbOrder struct {
 	Status          string
 	VerificationTok string
 	PaymentComment  string
+	QRPayload       sql.NullString
+	QRURL           sql.NullString
+	QRImageURL      sql.NullString
+	ProviderOrderID sql.NullString
+	ProviderStatus  sql.NullString
 	CreatedAt       time.Time
 	ExpiresAt       time.Time
 	ConfirmedAt     sql.NullTime
@@ -164,9 +213,19 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+type sbpQRData struct {
+	Payload         string
+	URL             string
+	ImageURL        string
+	ProviderOrderID string
+	ProviderStatus  string
+}
+
 const userContextKey = "auth_user"
 
 func main() {
+	_ = godotenv.Load()
+
 	cfg, err := loadConfig()
 	if err != nil {
 		log.Fatalf("config error: %v", err)
@@ -208,6 +267,8 @@ func main() {
 			"time":    time.Now().UTC().Format(time.RFC3339),
 		})
 	})
+
+	router.POST("/api/v1/provider/webhook/sbp", providerWebhookHandler(db, cfg))
 
 	api := router.Group("/api/v1")
 	api.Use(authMiddleware(cfg))
@@ -273,6 +334,27 @@ func loadConfig() (Config, error) {
 		origins = []string{"*"}
 	}
 
+	providerMode := strings.ToLower(envOrDefault("SBP_PROVIDER_MODE", "mock"))
+	if providerMode != "mock" && providerMode != "http" {
+		return Config{}, errors.New("SBP_PROVIDER_MODE must be either mock or http")
+	}
+
+	providerCreateURL := strings.TrimSpace(os.Getenv("SBP_PROVIDER_CREATE_URL"))
+	providerAPIKey := strings.TrimSpace(os.Getenv("SBP_PROVIDER_API_KEY"))
+	if providerMode == "http" {
+		if providerCreateURL == "" {
+			return Config{}, errors.New("SBP_PROVIDER_CREATE_URL is required when SBP_PROVIDER_MODE=http")
+		}
+		if providerAPIKey == "" {
+			return Config{}, errors.New("SBP_PROVIDER_API_KEY is required when SBP_PROVIDER_MODE=http")
+		}
+	}
+
+	providerTimeoutSeconds := envIntOrDefault("SBP_PROVIDER_TIMEOUT_SECONDS", 10)
+	if providerTimeoutSeconds < 2 {
+		providerTimeoutSeconds = 2
+	}
+
 	return Config{
 		Port:                 port,
 		DatabaseURL:          dbURL,
@@ -287,6 +369,11 @@ func loadConfig() (Config, error) {
 		SBPRecipientPhone:    envOrDefault("SBP_RECIPIENT_PHONE", "+79013622325"),
 		SBPRecipientBankName: envOrDefault("SBP_RECIPIENT_BANK", "Tinkoff"),
 		SBPRecipientName:     envOrDefault("SBP_RECIPIENT_NAME", "AOA Flashcards"),
+		SBPProviderMode:      providerMode,
+		SBPProviderCreateURL: providerCreateURL,
+		SBPProviderAPIKey:    providerAPIKey,
+		SBPWebhookSecret:     strings.TrimSpace(os.Getenv("SBP_WEBHOOK_SECRET")),
+		SBPProviderTimeout:   time.Duration(providerTimeoutSeconds) * time.Second,
 	}, nil
 }
 
@@ -304,9 +391,27 @@ func authMiddleware(cfg Config) gin.HandlerFunc {
 			return
 		}
 
+		// Fast-fail obviously expired JWTs without network dependency.
+		//if expiry, err := jwtExpiry(accessToken); err == nil && !expiry.After(time.Now().UTC()) {
+		//	c.JSON(http.StatusUnauthorized, gin.H{"error": "auth token expired"})
+		//	c.Abort()
+		//	return
+		//}
+
 		user, err := fetchSupabaseUser(c.Request.Context(), cfg, accessToken)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or expired auth token"})
+			switch {
+			case errors.Is(err, errAuthTokenExpired):
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "auth token expired"})
+			case errors.Is(err, errAuthTokenInvalid):
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid auth token"})
+			case errors.Is(err, errAuthServiceMisconfigured):
+				log.Printf("auth middleware misconfigured: %v", err)
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "payment auth service misconfigured"})
+			default:
+				log.Printf("auth middleware unavailable: %v", err)
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable"})
+			}
 			c.Abort()
 			return
 		}
@@ -328,6 +433,9 @@ func adminMiddleware(adminToken string) gin.HandlerFunc {
 }
 
 func fetchSupabaseUser(ctx context.Context, cfg Config, accessToken string) (*AuthUser, error) {
+	ctx, cancel := context.WithTimeout(ctx, supabaseAuthTimeout)
+	defer cancel()
+
 	req, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -340,24 +448,77 @@ func fetchSupabaseUser(ctx context.Context, cfg Config, accessToken string) (*Au
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("apikey", cfg.SupabaseAnonKey)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := supabaseAuthHTTPClient.Do(req)
 	if err != nil {
-		return nil, err
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return nil, fmt.Errorf("%w: timeout calling supabase auth", errAuthServiceUnavailable)
+		}
+		return nil, fmt.Errorf("%w: failed to call supabase auth: %v", errAuthServiceUnavailable, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("supabase auth status %d", resp.StatusCode)
+		payloadBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxSupabaseAuthErrorBodyBytes))
+		payload := strings.ToLower(strings.TrimSpace(string(payloadBytes)))
+
+		switch resp.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden:
+			if looksLikeSupabaseConfigError(payload) {
+				return nil, fmt.Errorf("%w: supabase auth rejected api key", errAuthServiceMisconfigured)
+			}
+			if strings.Contains(payload, "expired") {
+				return nil, fmt.Errorf("%w: upstream reports expired token", errAuthTokenExpired)
+			}
+			return nil, fmt.Errorf("%w: supabase auth status %d", errAuthTokenInvalid, resp.StatusCode)
+		case http.StatusTooManyRequests:
+			return nil, fmt.Errorf("%w: supabase auth throttled", errAuthServiceUnavailable)
+		default:
+			if resp.StatusCode >= http.StatusInternalServerError {
+				return nil, fmt.Errorf("%w: supabase auth status %d", errAuthServiceUnavailable, resp.StatusCode)
+			}
+			return nil, fmt.Errorf("%w: unexpected supabase auth status %d", errAuthServiceUnavailable, resp.StatusCode)
+		}
 	}
 
 	var payload AuthUser
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid auth payload: %v", errAuthServiceUnavailable, err)
 	}
 	if payload.ID == "" {
-		return nil, errors.New("missing user id from supabase")
+		return nil, fmt.Errorf("%w: missing user id from supabase", errAuthServiceUnavailable)
 	}
 	return &payload, nil
+}
+
+func looksLikeSupabaseConfigError(payload string) bool {
+	return strings.Contains(payload, "apikey") ||
+		strings.Contains(payload, "api key") ||
+		strings.Contains(payload, "invalid key") ||
+		strings.Contains(payload, "missing key")
+}
+
+func jwtExpiry(accessToken string) (time.Time, error) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return time.Time{}, errors.New("invalid jwt format")
+	}
+
+	claimsRaw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(claimsRaw, &claims); err != nil {
+		return time.Time{}, err
+	}
+	if claims.Exp <= 0 {
+		return time.Time{}, errors.New("missing exp claim")
+	}
+
+	return time.Unix(claims.Exp, 0).UTC(), nil
 }
 
 func createOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
@@ -386,12 +547,13 @@ func createOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 			 FROM payment_orders
 			 WHERE user_id = $1
 			   AND plan_id = $2
-			   AND status IN ('pending', 'awaiting_verification')
+			   AND verified_at IS NULL
 			   AND expires_at > NOW()`,
 			user.ID,
 			plan.ID,
 		).Scan(&pendingCount)
 		if err != nil {
+			log.Printf("failed to check pending orders: user=%s plan=%s err=%v", user.ID, plan.ID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check pending orders"})
 			return
 		}
@@ -414,14 +576,23 @@ func createOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 		now := time.Now().UTC()
 		expiresAt := now.Add(cfg.OrderTTL)
 		paymentComment := orderID
+		qrData, err := createSBPQR(c.Request.Context(), cfg, orderID, plan, paymentComment, expiresAt)
+		if err != nil {
+			log.Printf("failed to create SBP QR for order %s: %v", orderID, err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to initialize SBP QR payment"})
+			return
+		}
+		if qrData.ProviderStatus == "" {
+			qrData.ProviderStatus = statusPending
+		}
 
 		_, err = db.ExecContext(
 			ctx,
 			`INSERT INTO payment_orders (
 				order_id, user_id, user_email, plan_id, plan_name, amount_rub, period, status, verification_token,
-				payment_comment, created_at, expires_at
+				payment_comment, qr_payload, qr_url, qr_image_url, provider_order_id, provider_status, created_at, expires_at
 			) VALUES (
-				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
 			)`,
 			orderID,
 			user.ID,
@@ -433,6 +604,11 @@ func createOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 			statusPending,
 			token,
 			paymentComment,
+			nullIfEmpty(qrData.Payload),
+			nullIfEmpty(qrData.URL),
+			nullIfEmpty(qrData.ImageURL),
+			nullIfEmpty(qrData.ProviderOrderID),
+			nullIfEmpty(qrData.ProviderStatus),
 			now,
 			expiresAt,
 		)
@@ -455,7 +631,12 @@ func createOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 				BankName: cfg.SBPRecipientBankName,
 				Name:     cfg.SBPRecipientName,
 			},
-			Token: token,
+			QRPayload:       qrData.Payload,
+			QRURL:           qrData.URL,
+			QRImageURL:      qrData.ImageURL,
+			ProviderOrderID: qrData.ProviderOrderID,
+			ProviderStatus:  qrData.ProviderStatus,
+			Token:           token,
 		}
 		c.JSON(http.StatusOK, resp)
 	}
@@ -573,6 +754,22 @@ func confirmOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 			return
 		}
 
+		if order.Status == statusConfirmed {
+			c.JSON(http.StatusOK, gin.H{
+				"orderId": order.OrderID,
+				"status":  statusConfirmed,
+				"message": "payment already confirmed",
+			})
+			return
+		}
+		if order.Status == statusAwaitingVerification {
+			c.JSON(http.StatusOK, gin.H{
+				"orderId": order.OrderID,
+				"status":  statusAwaitingVerification,
+				"message": "payment already awaiting verification",
+			})
+			return
+		}
 		if order.Status != statusPending {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("order cannot be confirmed in status %q", order.Status)})
 			return
@@ -606,6 +803,484 @@ func confirmOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 			"message": "payment confirmation received, waiting for verification",
 		})
 	}
+}
+
+func providerWebhookHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		rawBody, err := io.ReadAll(io.LimitReader(c.Request.Body, 1<<20))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook body"})
+			return
+		}
+
+		if !verifySBPWebhook(c, cfg, rawBody) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"})
+			return
+		}
+
+		payload := map[string]any{}
+		if err := json.Unmarshal(rawBody, &payload); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook json"})
+			return
+		}
+
+		orderID := extractWebhookOrderID(payload)
+		if orderID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing order id in webhook payload"})
+			return
+		}
+
+		providerOrderID := extractWebhookProviderOrderID(payload)
+		providerStatus := strings.TrimSpace(extractWebhookStatus(payload))
+		normalizedStatus := normalizeProviderStatus(providerStatus)
+		if normalizedStatus == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported webhook status"})
+			return
+		}
+
+		if err := applyProviderOrderUpdate(
+			c.Request.Context(),
+			db,
+			cfg,
+			orderID,
+			providerOrderID,
+			providerStatus,
+			normalizedStatus,
+		); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "order not found"})
+				return
+			}
+			log.Printf("provider webhook update failed for order %s: %v", orderID, err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to apply webhook update"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"ok":      true,
+			"orderId": orderID,
+			"status":  normalizedStatus,
+		})
+	}
+}
+
+func createSBPQR(ctx context.Context, cfg Config, orderID string, plan Plan, paymentComment string, expiresAt time.Time) (sbpQRData, error) {
+	if cfg.SBPProviderMode == "http" {
+		return createSBPQRViaProviderHTTP(ctx, cfg, orderID, plan, paymentComment, expiresAt)
+	}
+	return createSBPQRMock(cfg, orderID, plan, paymentComment)
+}
+
+func createSBPQRMock(cfg Config, orderID string, plan Plan, paymentComment string) (sbpQRData, error) {
+	values := url.Values{}
+	values.Set("phone", cfg.SBPRecipientPhone)
+	values.Set("amount", strconv.Itoa(plan.PriceRub*100))
+	values.Set("currency", "RUB")
+	values.Set("bank", cfg.SBPRecipientBankName)
+	values.Set("recipient", cfg.SBPRecipientName)
+	values.Set("comment", paymentComment)
+	values.Set("orderId", orderID)
+	values.Set("planId", plan.ID)
+
+	payload := "sbp://pay?" + values.Encode()
+	imageURL, err := generateQRDataURL(payload)
+	if err != nil {
+		return sbpQRData{}, err
+	}
+
+	return sbpQRData{
+		Payload:        payload,
+		URL:            payload,
+		ImageURL:       imageURL,
+		ProviderStatus: statusPending,
+	}, nil
+}
+
+func createSBPQRViaProviderHTTP(ctx context.Context, cfg Config, orderID string, plan Plan, paymentComment string, expiresAt time.Time) (sbpQRData, error) {
+	payload := map[string]any{
+		"orderId":     orderID,
+		"amount":      plan.PriceRub,
+		"currency":    "RUB",
+		"description": fmt.Sprintf("%s (%s)", plan.Name, orderID),
+		"comment":     paymentComment,
+		"expiresAt":   expiresAt.UTC().Format(time.RFC3339),
+		"metadata": map[string]any{
+			"orderId":        orderID,
+			"paymentComment": paymentComment,
+			"planId":         plan.ID,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return sbpQRData{}, err
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, cfg.SBPProviderTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.SBPProviderCreateURL, strings.NewReader(string(bodyBytes)))
+	if err != nil {
+		return sbpQRData{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.SBPProviderAPIKey)
+
+	client := &http.Client{Timeout: cfg.SBPProviderTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return sbpQRData{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return sbpQRData{}, fmt.Errorf("provider create error: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	responseData := map[string]any{}
+	if err := json.Unmarshal(respBody, &responseData); err != nil {
+		return sbpQRData{}, fmt.Errorf("provider response parse error: %w", err)
+	}
+
+	qrPayload := firstNonEmpty(
+		stringFromMap(responseData, "qrPayload"),
+		stringFromMap(responseData, "qr_payload"),
+		stringFromMap(responseData, "payload"),
+		stringFromMap(responseData, "qrData"),
+	)
+	qrURL := firstNonEmpty(
+		stringFromMap(responseData, "qrUrl"),
+		stringFromMap(responseData, "qr_url"),
+		stringFromMap(responseData, "paymentUrl"),
+		stringFromMap(responseData, "payment_url"),
+		stringFromMap(responseData, "payUrl"),
+		stringFromMap(responseData, "pay_url"),
+	)
+	qrImageURL := firstNonEmpty(
+		stringFromMap(responseData, "qrImageUrl"),
+		stringFromMap(responseData, "qr_image_url"),
+		stringFromMap(responseData, "qrImage"),
+		stringFromMap(responseData, "imageUrl"),
+		stringFromMap(responseData, "image_url"),
+	)
+	providerOrderID := firstNonEmpty(
+		stringFromMap(responseData, "paymentId"),
+		stringFromMap(responseData, "payment_id"),
+		stringFromMap(responseData, "providerOrderId"),
+		stringFromMap(responseData, "provider_order_id"),
+		stringFromMap(responseData, "id"),
+	)
+	providerStatus := firstNonEmpty(
+		stringFromMap(responseData, "status"),
+		stringFromMap(responseData, "state"),
+	)
+
+	if qrPayload == "" && qrURL == "" {
+		return sbpQRData{}, errors.New("provider did not return qr payload or qr url")
+	}
+	if qrPayload == "" {
+		qrPayload = qrURL
+	}
+	if qrURL == "" {
+		qrURL = qrPayload
+	}
+	if qrImageURL == "" {
+		generated, err := generateQRDataURL(qrPayload)
+		if err != nil {
+			return sbpQRData{}, err
+		}
+		qrImageURL = generated
+	}
+
+	return sbpQRData{
+		Payload:         qrPayload,
+		URL:             qrURL,
+		ImageURL:        qrImageURL,
+		ProviderOrderID: providerOrderID,
+		ProviderStatus:  providerStatus,
+	}, nil
+}
+
+func generateQRDataURL(payload string) (string, error) {
+	pngData, err := qrcode.Encode(payload, qrcode.Medium, 256)
+	if err != nil {
+		return "", err
+	}
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(pngData), nil
+}
+
+func verifySBPWebhook(c *gin.Context, cfg Config, body []byte) bool {
+	secret := strings.TrimSpace(cfg.SBPWebhookSecret)
+	if secret == "" {
+		return true
+	}
+
+	signed := strings.TrimSpace(c.GetHeader("X-SBP-Signature"))
+	if signed != "" {
+		signed = strings.TrimPrefix(strings.ToLower(signed), "sha256=")
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(body)
+		expected := hex.EncodeToString(mac.Sum(nil))
+		return hmac.Equal([]byte(signed), []byte(expected))
+	}
+
+	plainSecret := strings.TrimSpace(c.GetHeader("X-Webhook-Secret"))
+	return hmac.Equal([]byte(plainSecret), []byte(secret))
+}
+
+func applyProviderOrderUpdate(
+	ctx context.Context,
+	db *sql.DB,
+	cfg Config,
+	orderID string,
+	providerOrderID string,
+	providerStatus string,
+	normalizedStatus string,
+) error {
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	order, err := loadOrderByIDForUpdate(ctx, tx, orderID)
+	if err != nil {
+		return err
+	}
+
+	currentProviderStatus := strings.TrimSpace(providerStatus)
+	if currentProviderStatus == "" {
+		currentProviderStatus = normalizedStatus
+	}
+
+	now := time.Now().UTC()
+	switch normalizedStatus {
+	case statusConfirmed:
+		if order.Status != statusConfirmed {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET status = $2,
+				     verified_at = $3,
+				     rejection_reason = NULL,
+				     provider_order_id = COALESCE(NULLIF($4, ''), provider_order_id),
+				     provider_status = $5
+				 WHERE order_id = $1`,
+				order.OrderID,
+				statusConfirmed,
+				now,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+			order.Status = statusConfirmed
+			order.VerifiedAt = sql.NullTime{Time: now, Valid: true}
+			if err := activateSubscription(ctx, tx, order, cfg); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET provider_order_id = COALESCE(NULLIF($2, ''), provider_order_id),
+				     provider_status = $3
+				 WHERE order_id = $1`,
+				order.OrderID,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+		}
+	case statusRejected:
+		if order.Status != statusConfirmed {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET status = $2,
+				     verified_at = $3,
+				     rejection_reason = COALESCE(rejection_reason, 'provider rejected payment'),
+				     provider_order_id = COALESCE(NULLIF($4, ''), provider_order_id),
+				     provider_status = $5
+				 WHERE order_id = $1`,
+				order.OrderID,
+				statusRejected,
+				now,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET provider_order_id = COALESCE(NULLIF($2, ''), provider_order_id),
+				     provider_status = $3
+				 WHERE order_id = $1`,
+				order.OrderID,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+		}
+	case statusAwaitingVerification:
+		if order.Status == statusPending {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET status = $2,
+				     confirmed_at = COALESCE(confirmed_at, $3),
+				     provider_order_id = COALESCE(NULLIF($4, ''), provider_order_id),
+				     provider_status = $5
+				 WHERE order_id = $1`,
+				order.OrderID,
+				statusAwaitingVerification,
+				now,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(
+				ctx,
+				`UPDATE payment_orders
+				 SET provider_order_id = COALESCE(NULLIF($2, ''), provider_order_id),
+				     provider_status = $3
+				 WHERE order_id = $1`,
+				order.OrderID,
+				providerOrderID,
+				currentProviderStatus,
+			); err != nil {
+				return err
+			}
+		}
+	default:
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE payment_orders
+			 SET provider_order_id = COALESCE(NULLIF($2, ''), provider_order_id),
+			     provider_status = $3
+			 WHERE order_id = $1`,
+			order.OrderID,
+			providerOrderID,
+			currentProviderStatus,
+		); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func extractWebhookOrderID(payload map[string]any) string {
+	if orderID := firstNonEmpty(
+		stringFromMap(payload, "orderId"),
+		stringFromMap(payload, "order_id"),
+		stringFromMap(payload, "merchantOrderId"),
+		stringFromMap(payload, "merchant_order_id"),
+		stringFromMap(payload, "invoiceId"),
+		stringFromMap(payload, "invoice_id"),
+	); orderID != "" {
+		return orderID
+	}
+
+	metadata := mapFromMap(payload, "metadata")
+	if metadata == nil {
+		metadata = mapFromMap(payload, "meta")
+	}
+	if metadata != nil {
+		return firstNonEmpty(
+			stringFromMap(metadata, "orderId"),
+			stringFromMap(metadata, "order_id"),
+			stringFromMap(metadata, "paymentComment"),
+			stringFromMap(metadata, "payment_comment"),
+		)
+	}
+
+	return ""
+}
+
+func extractWebhookProviderOrderID(payload map[string]any) string {
+	return firstNonEmpty(
+		stringFromMap(payload, "paymentId"),
+		stringFromMap(payload, "payment_id"),
+		stringFromMap(payload, "providerOrderId"),
+		stringFromMap(payload, "provider_order_id"),
+		stringFromMap(payload, "id"),
+	)
+}
+
+func extractWebhookStatus(payload map[string]any) string {
+	return firstNonEmpty(
+		stringFromMap(payload, "status"),
+		stringFromMap(payload, "state"),
+		stringFromMap(payload, "event"),
+	)
+}
+
+func normalizeProviderStatus(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
+	case "paid", "succeeded", "success", "confirmed", "completed":
+		return statusConfirmed
+	case "awaiting_verification", "processing", "pending", "waiting":
+		return statusAwaitingVerification
+	case "failed", "rejected", "declined", "canceled", "cancelled":
+		return statusRejected
+	default:
+		return ""
+	}
+}
+
+func mapFromMap(data map[string]any, key string) map[string]any {
+	raw, ok := data[key]
+	if !ok {
+		return nil
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m
+}
+
+func stringFromMap(data map[string]any, key string) string {
+	raw, ok := data[key]
+	if !ok || raw == nil {
+		return ""
+	}
+
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case fmt.Stringer:
+		return strings.TrimSpace(v.String())
+	case float64:
+		return strings.TrimSpace(strconv.FormatInt(int64(v), 10))
+	case int:
+		return strings.TrimSpace(strconv.Itoa(v))
+	case int64:
+		return strings.TrimSpace(strconv.FormatInt(v, 10))
+	case json.Number:
+		return strings.TrimSpace(v.String())
+	default:
+		return ""
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		clean := strings.TrimSpace(value)
+		if clean != "" {
+			return clean
+		}
+	}
+	return ""
 }
 
 func verifyOrderHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
@@ -836,7 +1511,8 @@ func loadOrderByID(ctx context.Context, db *sql.DB, orderID string) (*dbOrder, e
 	row := db.QueryRowContext(
 		ctx,
 		`SELECT order_id, user_id, user_email, plan_id, plan_name, amount_rub, period, status, verification_token,
-		        payment_comment, created_at, expires_at, confirmed_at, verified_at, rejection_reason
+		        payment_comment, qr_payload, qr_url, qr_image_url, provider_order_id, provider_status,
+		        created_at, expires_at, confirmed_at, verified_at, rejection_reason
 		   FROM payment_orders
 		  WHERE order_id = $1`,
 		orderID,
@@ -848,7 +1524,8 @@ func loadOrderByIDForUpdate(ctx context.Context, tx *sql.Tx, orderID string) (*d
 	row := tx.QueryRowContext(
 		ctx,
 		`SELECT order_id, user_id, user_email, plan_id, plan_name, amount_rub, period, status, verification_token,
-		        payment_comment, created_at, expires_at, confirmed_at, verified_at, rejection_reason
+		        payment_comment, qr_payload, qr_url, qr_image_url, provider_order_id, provider_status,
+		        created_at, expires_at, confirmed_at, verified_at, rejection_reason
 		   FROM payment_orders
 		  WHERE order_id = $1
 		  FOR UPDATE`,
@@ -870,6 +1547,11 @@ func scanOrder(row scanner) (*dbOrder, error) {
 		&order.Status,
 		&order.VerificationTok,
 		&order.PaymentComment,
+		&order.QRPayload,
+		&order.QRURL,
+		&order.QRImageURL,
+		&order.ProviderOrderID,
+		&order.ProviderStatus,
 		&order.CreatedAt,
 		&order.ExpiresAt,
 		&order.ConfirmedAt,
@@ -922,6 +1604,21 @@ func toOrderResponse(order *dbOrder, cfg Config, includeToken bool) OrderRespons
 			Name:     cfg.SBPRecipientName,
 		},
 		CreatedAt: &createdAt,
+	}
+	if order.QRPayload.Valid {
+		resp.QRPayload = order.QRPayload.String
+	}
+	if order.QRURL.Valid {
+		resp.QRURL = order.QRURL.String
+	}
+	if order.QRImageURL.Valid {
+		resp.QRImageURL = order.QRImageURL.String
+	}
+	if order.ProviderOrderID.Valid {
+		resp.ProviderOrderID = order.ProviderOrderID.String
+	}
+	if order.ProviderStatus.Valid {
+		resp.ProviderStatus = order.ProviderStatus.String
 	}
 	if includeToken {
 		resp.Token = order.VerificationTok
