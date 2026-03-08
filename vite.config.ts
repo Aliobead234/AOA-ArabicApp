@@ -3,10 +3,18 @@ import path from 'path'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 
-const repoName = 'AOA-ArabicApp'
+function normalizeBasePath(rawBasePath?: string): string {
+  const trimmed = (rawBasePath ?? '/').trim()
+  if (!trimmed || trimmed === '/') return '/'
+
+  const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return withLeading.endsWith('/') ? withLeading : `${withLeading}/`
+}
+
+const basePath = normalizeBasePath(process.env.VITE_PUBLIC_BASE_PATH)
 
 export default defineConfig({
-  base: process.env.NODE_ENV === 'production' ? `/${repoName}/` : '/',
+  base: basePath,
   plugins: [
     // The React and Tailwind plugins are both required for Make, even if
     // Tailwind is not being actively used – do not remove them

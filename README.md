@@ -9,6 +9,32 @@
 
   Run `npm run dev` to start the development server.
 
+  ## Deploy on Vercel
+
+  Added deployment config:
+
+  - `vercel.json` (Vite output + SPA rewrites)
+  - `.env.example` (production env template)
+  - `vite.config.ts` now uses `VITE_PUBLIC_BASE_PATH` (default `/`)
+
+  ### Vercel project settings
+
+  - Framework: `Vite`
+  - Build Command: `npm run build`
+  - Output Directory: `dist`
+
+  ### Required Vercel environment variables
+
+  - `VITE_PUBLIC_BASE_PATH=/`
+  - `VITE_PAYMENT_BACKEND_MODE=supabase` (recommended first deploy)
+  - `VITE_PAYMENT_MICRO_BASE_URL` only if using external Go microservice
+  - `VITE_PAYMENT_MICRO_TIMEOUT_MS=8000`
+
+  ### Important payment note
+
+  The Go payment microservice in `microservices/sbp-payment-go` is not hosted by this static Vercel frontend deployment.
+  Deploy it separately (Railway/Render/Fly/etc.) and then set `VITE_PAYMENT_MICRO_BASE_URL` to its public URL.
+
   ## Payment microservice (SBP, Go)
 
   A migration-safe SBP payment microservice is available in:
