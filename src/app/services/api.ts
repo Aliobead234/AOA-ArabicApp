@@ -1,9 +1,8 @@
 // API service - all server calls go through here
 // Easy to swap base URL when migrating to Go + Railway
-import { projectId } from '../../utils/supabase/info';
 import * as authService from './auth';
 
-const BASE_URL = `https://${projectId}.supabase.co/functions/v1/make-server-205d64da`;
+const BASE_URL = `https://xmhqgwrwezonofhvukpp.supabase.co/functions/v1/make-server-205d64da`;
 
 interface RequestOptions {
   method?: string;
