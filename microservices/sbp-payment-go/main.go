@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	gocrypto "crypto"
 	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +23,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-contrib/cors"
@@ -128,6 +133,11 @@ type Config struct {
 	SBPProviderAPIKey    string
 	SBPWebhookSecret     string
 	SBPProviderTimeout   time.Duration
+	// Tochka Bank acquiring
+	TochkaJWTToken      string
+	TochkaCustomerCode  string
+	TochkaPaymentMode   string // "card", "sbp", "tinkoff"
+	TochkaWebhookKeyURL string
 }
 
 type AuthUser struct {
@@ -222,6 +232,14 @@ type sbpQRData struct {
 }
 
 const userContextKey = "auth_user"
+
+// tochkaKeyCache caches Tochka's RS256 public key for 24 h to avoid
+// fetching it on every webhook call.
+var tochkaKeyCache struct {
+	sync.RWMutex
+	pem     []byte
+	fetchAt time.Time
+}
 
 func main() {
 	_ = godotenv.Load()
@@ -335,8 +353,8 @@ func loadConfig() (Config, error) {
 	}
 
 	providerMode := strings.ToLower(envOrDefault("SBP_PROVIDER_MODE", "mock"))
-	if providerMode != "mock" && providerMode != "http" {
-		return Config{}, errors.New("SBP_PROVIDER_MODE must be either mock or http")
+	if providerMode != "mock" && providerMode != "http" && providerMode != "tochka" {
+		return Config{}, errors.New("SBP_PROVIDER_MODE must be: mock, http, or tochka")
 	}
 
 	providerCreateURL := strings.TrimSpace(os.Getenv("SBP_PROVIDER_CREATE_URL"))
@@ -347,6 +365,19 @@ func loadConfig() (Config, error) {
 		}
 		if providerAPIKey == "" {
 			return Config{}, errors.New("SBP_PROVIDER_API_KEY is required when SBP_PROVIDER_MODE=http")
+		}
+	}
+
+	tochkaJWT := strings.TrimSpace(os.Getenv("TOCHKA_JWT_TOKEN"))
+	tochkaCode := strings.TrimSpace(os.Getenv("TOCHKA_CUSTOMER_CODE"))
+	tochkaPayMode := envOrDefault("TOCHKA_PAYMENT_MODE", "card")
+	tochkaKeyURL := envOrDefault("TOCHKA_WEBHOOK_KEY_URL", "https://enter.tochka.com/doc/openapi/static/keys/public")
+	if providerMode == "tochka" {
+		if tochkaJWT == "" {
+			return Config{}, errors.New("TOCHKA_JWT_TOKEN is required when SBP_PROVIDER_MODE=tochka")
+		}
+		if tochkaCode == "" {
+			return Config{}, errors.New("TOCHKA_CUSTOMER_CODE is required when SBP_PROVIDER_MODE=tochka")
 		}
 	}
 
@@ -374,6 +405,10 @@ func loadConfig() (Config, error) {
 		SBPProviderAPIKey:    providerAPIKey,
 		SBPWebhookSecret:     strings.TrimSpace(os.Getenv("SBP_WEBHOOK_SECRET")),
 		SBPProviderTimeout:   time.Duration(providerTimeoutSeconds) * time.Second,
+		TochkaJWTToken:       tochkaJWT,
+		TochkaCustomerCode:   tochkaCode,
+		TochkaPaymentMode:    tochkaPayMode,
+		TochkaWebhookKeyURL:  tochkaKeyURL,
 	}, nil
 }
 
@@ -813,15 +848,33 @@ func providerWebhookHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 			return
 		}
 
-		if !verifySBPWebhook(c, cfg, rawBody) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"})
-			return
-		}
-
 		payload := map[string]any{}
-		if err := json.Unmarshal(rawBody, &payload); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook json"})
-			return
+
+		if cfg.SBPProviderMode == "tochka" {
+			// Tochka sends the entire webhook body as a RS256-signed JWT string.
+			tokenStr := strings.TrimSpace(string(rawBody))
+			pubKeyPEM, err := fetchTochkaPublicKey(cfg.TochkaWebhookKeyURL)
+			if err != nil {
+				log.Printf("tochka: failed to fetch public key: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch webhook key"})
+				return
+			}
+			claims, err := verifyRS256JWT(tokenStr, pubKeyPEM)
+			if err != nil {
+				log.Printf("tochka: JWT verification failed: %v", err)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook JWT"})
+				return
+			}
+			payload = claims
+		} else {
+			if !verifySBPWebhook(c, cfg, rawBody) {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid webhook signature"})
+				return
+			}
+			if err := json.Unmarshal(rawBody, &payload); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid webhook json"})
+				return
+			}
 		}
 
 		orderID := extractWebhookOrderID(payload)
@@ -865,10 +918,14 @@ func providerWebhookHandler(db *sql.DB, cfg Config) gin.HandlerFunc {
 }
 
 func createSBPQR(ctx context.Context, cfg Config, orderID string, plan Plan, paymentComment string, expiresAt time.Time) (sbpQRData, error) {
-	if cfg.SBPProviderMode == "http" {
+	switch cfg.SBPProviderMode {
+	case "tochka":
+		return createTochkaPaymentLink(ctx, cfg, orderID, plan)
+	case "http":
 		return createSBPQRViaProviderHTTP(ctx, cfg, orderID, plan, paymentComment, expiresAt)
+	default:
+		return createSBPQRMock(cfg, orderID, plan, paymentComment)
 	}
-	return createSBPQRMock(cfg, orderID, plan, paymentComment)
 }
 
 func createSBPQRMock(cfg Config, orderID string, plan Plan, paymentComment string) (sbpQRData, error) {
@@ -895,6 +952,173 @@ func createSBPQRMock(cfg Config, orderID string, plan Plan, paymentComment strin
 		ProviderStatus: statusPending,
 	}, nil
 }
+
+// ── Tochka Bank acquiring ─────────────────────────────────────────────────────
+
+// createTochkaPaymentLink calls POST /acquiring/v1.0/payments and returns a
+// clickable/scannable payment URL that accepts card, SBP, and T-Pay.
+func createTochkaPaymentLink(ctx context.Context, cfg Config, orderID string, plan Plan) (sbpQRData, error) {
+	// Embed orderID in "purpose" — Tochka echoes it back in the webhook payload.
+	body := map[string]any{
+		"customerCode": cfg.TochkaCustomerCode,
+		"amount":       float64(plan.PriceRub),
+		"purpose":      orderID,
+		"paymentMode":  cfg.TochkaPaymentMode,
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return sbpQRData{}, err
+	}
+
+	reqCtx, cancel := context.WithTimeout(ctx, cfg.SBPProviderTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(
+		reqCtx, http.MethodPost,
+		"https://enter.tochka.com/api/acquiring/v1.0/payments",
+		strings.NewReader(string(bodyBytes)),
+	)
+	if err != nil {
+		return sbpQRData{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.TochkaJWTToken)
+
+	client := &http.Client{Timeout: cfg.SBPProviderTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return sbpQRData{}, fmt.Errorf("tochka api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return sbpQRData{}, fmt.Errorf("tochka create error: status=%d body=%s",
+			resp.StatusCode, strings.TrimSpace(string(respBody)))
+	}
+
+	var result struct {
+		OperationID string `json:"operationId"`
+		PaymentURL  string `json:"paymentUrl"`
+		Status      string `json:"status"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return sbpQRData{}, fmt.Errorf("tochka response parse error: %w", err)
+	}
+	if result.PaymentURL == "" {
+		return sbpQRData{}, errors.New("tochka did not return a paymentUrl")
+	}
+
+	// Generate a QR code so users can scan on mobile; link is also clickable.
+	imageURL, _ := generateQRDataURL(result.PaymentURL)
+
+	return sbpQRData{
+		Payload:         result.PaymentURL,
+		URL:             result.PaymentURL,
+		ImageURL:        imageURL,
+		ProviderOrderID: result.OperationID,
+		ProviderStatus:  result.Status,
+	}, nil
+}
+
+// fetchTochkaPublicKey downloads Tochka's RS256 public key and caches it for
+// 24 hours. Thread-safe.
+func fetchTochkaPublicKey(keyURL string) ([]byte, error) {
+	tochkaKeyCache.RLock()
+	if len(tochkaKeyCache.pem) > 0 && time.Since(tochkaKeyCache.fetchAt) < 24*time.Hour {
+		cached := tochkaKeyCache.pem
+		tochkaKeyCache.RUnlock()
+		return cached, nil
+	}
+	tochkaKeyCache.RUnlock()
+
+	tochkaKeyCache.Lock()
+	defer tochkaKeyCache.Unlock()
+
+	// Re-check under write lock (double-checked locking).
+	if len(tochkaKeyCache.pem) > 0 && time.Since(tochkaKeyCache.fetchAt) < 24*time.Hour {
+		return tochkaKeyCache.pem, nil
+	}
+
+	resp, err := http.Get(keyURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tochka public key: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("tochka public key fetch returned status %d", resp.StatusCode)
+	}
+
+	pemBytes, err := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read tochka public key body: %w", err)
+	}
+
+	tochkaKeyCache.pem = pemBytes
+	tochkaKeyCache.fetchAt = time.Now()
+	return pemBytes, nil
+}
+
+// verifyRS256JWT verifies a JWT signed with RS256 using the provided PEM public
+// key and returns the decoded claims. Uses only Go standard library — no external
+// JWT package required.
+func verifyRS256JWT(tokenString string, publicKeyPEM []byte) (map[string]any, error) {
+	parts := strings.Split(strings.TrimSpace(tokenString), ".")
+	if len(parts) != 3 {
+		return nil, errors.New("invalid JWT: expected header.payload.signature")
+	}
+
+	headerBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT header encoding: %w", err)
+	}
+	var header struct {
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(headerBytes, &header); err != nil {
+		return nil, fmt.Errorf("invalid JWT header JSON: %w", err)
+	}
+	if !strings.EqualFold(header.Alg, "RS256") {
+		return nil, fmt.Errorf("unexpected JWT algorithm %q (expected RS256)", header.Alg)
+	}
+
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT payload encoding: %w", err)
+	}
+
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return nil, fmt.Errorf("invalid JWT signature encoding: %w", err)
+	}
+
+	block, _ := pem.Decode(publicKeyPEM)
+	if block == nil {
+		return nil, errors.New("failed to decode PEM block")
+	}
+	pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse public key: %w", err)
+	}
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("public key is not RSA")
+	}
+
+	signingInput := []byte(parts[0] + "." + parts[1])
+	digest := sha256.Sum256(signingInput)
+	if err := rsa.VerifyPKCS1v15(rsaPub, gocrypto.SHA256, digest[:], sigBytes); err != nil {
+		return nil, fmt.Errorf("JWT signature invalid: %w", err)
+	}
+
+	var claims map[string]any
+	if err := json.Unmarshal(payloadBytes, &claims); err != nil {
+		return nil, fmt.Errorf("invalid JWT payload JSON: %w", err)
+	}
+	return claims, nil
+}
+
+// ── end Tochka Bank ───────────────────────────────────────────────────────────
 
 func createSBPQRViaProviderHTTP(ctx context.Context, cfg Config, orderID string, plan Plan, paymentComment string, expiresAt time.Time) (sbpQRData, error) {
 	payload := map[string]any{
@@ -1185,6 +1409,7 @@ func extractWebhookOrderID(payload map[string]any) string {
 		stringFromMap(payload, "merchant_order_id"),
 		stringFromMap(payload, "invoiceId"),
 		stringFromMap(payload, "invoice_id"),
+		stringFromMap(payload, "purpose"), // Tochka Bank: orderID is embedded in purpose
 	); orderID != "" {
 		return orderID
 	}
@@ -1226,11 +1451,14 @@ func extractWebhookStatus(payload map[string]any) string {
 func normalizeProviderStatus(raw string) string {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	switch v {
-	case "paid", "succeeded", "success", "confirmed", "completed":
+	case "paid", "succeeded", "success", "confirmed", "completed",
+		"approved": // Tochka Bank: final successful payment
 		return statusConfirmed
-	case "awaiting_verification", "processing", "pending", "waiting":
+	case "awaiting_verification", "processing", "pending", "waiting",
+		"authorized": // Tochka Bank: pre-authorized, awaiting capture
 		return statusAwaitingVerification
-	case "failed", "rejected", "declined", "canceled", "cancelled":
+	case "failed", "rejected", "declined", "canceled", "cancelled",
+		"refunded": // Tochka Bank: rejected or refunded
 		return statusRejected
 	default:
 		return ""

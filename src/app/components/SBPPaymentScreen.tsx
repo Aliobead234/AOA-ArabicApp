@@ -20,6 +20,7 @@ import {
   Phone,
   MessageSquare,
   Banknote,
+  ExternalLink,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -412,6 +413,9 @@ export function SBPPaymentScreen({
     );
   }
 
+  // Detect Tochka/link-based payment (qrUrl is an HTTPS link, not a local sbp:// URI)
+  const isLinkPayment = Boolean(order.qrUrl?.startsWith("https://"));
+
   // Main payment instructions
   return (
     <div className={`flex flex-col h-full ${colors.bg}`}>
@@ -421,10 +425,8 @@ export function SBPPaymentScreen({
           <ArrowLeft size={22} />
         </button>
         <div className="text-center">
-          <h2
-            className={`${colors.text} text-base font-medium`}
-          >
-            SBP Payment
+          <h2 className={`${colors.text} text-base font-medium`}>
+            {isLinkPayment ? "Bank Card Payment" : "SBP Payment"}
           </h2>
           <p className={`text-[11px] ${colors.textDimmed}`}>
             Secure transfer
@@ -432,10 +434,7 @@ export function SBPPaymentScreen({
         </div>
         <div className="flex items-center gap-1.5">
           <Clock size={14} style={{ color: accent }} />
-          <span
-            className="text-xs font-mono"
-            style={{ color: accent }}
-          >
+          <span className="text-xs font-mono" style={{ color: accent }}>
             {timeLeft}
           </span>
         </div>
@@ -450,30 +449,20 @@ export function SBPPaymentScreen({
           style={isDark ? {} : { border: "1px solid #e8e3db" }}
         >
           <div className="flex items-center justify-between mb-3">
-            <span className={`${colors.textMuted} text-xs`}>
-              Plan
-            </span>
-            <span
-              className={`${colors.text} text-sm font-medium`}
-            >
+            <span className={`${colors.textMuted} text-xs`}>Plan</span>
+            <span className={`${colors.text} text-sm font-medium`}>
               {order.planName}
             </span>
           </div>
           <div className="flex items-center justify-between mb-3">
-            <span className={`${colors.textMuted} text-xs`}>
-              Amount
-            </span>
-            <span
-              className={`${colors.text} text-2xl font-bold`}
-            >
+            <span className={`${colors.textMuted} text-xs`}>Amount</span>
+            <span className={`${colors.text} text-2xl font-bold`}>
               {order.amount}{" "}
               <span className="text-sm font-normal">₽</span>
             </span>
           </div>
           <div className="flex items-center justify-between">
-            <span className={`${colors.textMuted} text-xs`}>
-              Period
-            </span>
+            <span className={`${colors.textMuted} text-xs`}>Period</span>
             <span className={`${colors.textSecondary} text-xs`}>
               {order.period === "monthly"
                 ? "Monthly subscription"
@@ -491,216 +480,268 @@ export function SBPPaymentScreen({
           style={{ backgroundColor: `${accent}15` }}
         >
           <ShieldCheck size={16} style={{ color: accent }} />
-          <span
-            className="text-[11px]"
-            style={{ color: accent }}
-          >
-            Secured order #{order.orderId} — all transfers are
-            tracked and verified
+          <span className="text-[11px]" style={{ color: accent }}>
+            Secured order #{order.orderId} — payment is tracked and
+            verified automatically
           </span>
         </motion.div>
 
-        {order.qrImageUrl && (
+        {isLinkPayment ? (
+          /* ── Tochka / link-based payment UI ── */
           <motion.div
             initial={{ y: 10, opacity: 0 }}
             animate={{ y: 0, opacity: 1 }}
             transition={{ delay: 0.08 }}
-            className={`${colors.card} rounded-2xl p-4 mb-4 ${!isDark ? "shadow-sm" : ""}`}
-            style={isDark ? {} : { border: "1px solid #e8e3db" }}
           >
-            <h3 className={`${colors.text} text-sm font-medium mb-1`}>
-              Pay via SBP QR
-            </h3>
-            <p className={`${colors.textMuted} text-xs mb-3`}>
-              Scan this QR code in your banking app.
-            </p>
-            <div className="flex items-center justify-center rounded-xl p-3 mb-3 bg-white">
-              <img
-                src={order.qrImageUrl}
-                alt="SBP QR code"
-                className="w-52 h-52 object-contain"
-              />
-            </div>
-            {order.qrUrl && (
-              <a
-                href={order.qrUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-xs underline"
-                style={{ color: accent }}
+            {order.qrImageUrl && (
+              <div
+                className={`${colors.card} rounded-2xl p-4 mb-4 ${!isDark ? "shadow-sm" : ""}`}
+                style={isDark ? {} : { border: "1px solid #e8e3db" }}
               >
-                Open payment link
-              </a>
+                <h3 className={`${colors.text} text-sm font-medium mb-1`}>
+                  Scan QR to Pay
+                </h3>
+                <p className={`${colors.textMuted} text-xs mb-3`}>
+                  Open your bank app and scan this code, or tap the
+                  button below to open the payment page.
+                </p>
+                <div className="flex items-center justify-center rounded-xl p-3 mb-3 bg-white">
+                  <img
+                    src={order.qrImageUrl}
+                    alt="Payment QR code"
+                    className="w-52 h-52 object-contain"
+                  />
+                </div>
+              </div>
             )}
-          </motion.div>
-        )}
 
-        {/* Payment details */}
-        <motion.div
-          initial={{ y: 10, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.1 }}
-        >
-          <h3
-            className={`${colors.text} text-sm font-medium mb-3`}
-          >
-            Transfer Details
-          </h3>
-          <p
-            className={`${colors.textMuted} text-xs mb-4 leading-relaxed`}
-          >
-            Open your banking app, select{" "}
-            <strong>SBP transfer by phone number</strong>, and
-            enter the details below:
-          </p>
-
-          {/* Recipient phone */}
-          <PaymentDetailRow
-            icon={<Phone size={16} />}
-            label="Phone Number"
-            value={order.recipient.phone}
-            displayValue={formatPhone(order.recipient.phone)}
-            onCopy={handleCopy}
-            copied={copiedField === "phone"}
-            fieldId="phone"
-            colors={colors}
-            isDark={isDark}
-            accent={accent}
-          />
-
-          {/* Bank */}
-          <PaymentDetailRow
-            icon={<Building2 size={16} />}
-            label="Bank"
-            value={order.recipient.bankName}
-            displayValue={order.recipient.bankName}
-            onCopy={handleCopy}
-            copied={copiedField === "bank"}
-            fieldId="bank"
-            colors={colors}
-            isDark={isDark}
-            accent={accent}
-          />
-
-          {/* Amount */}
-          <PaymentDetailRow
-            icon={<Banknote size={16} />}
-            label="Amount"
-            value={`${order.amount}`}
-            displayValue={`${order.amount} ₽`}
-            onCopy={handleCopy}
-            copied={copiedField === "amount"}
-            fieldId="amount"
-            colors={colors}
-            isDark={isDark}
-            accent={accent}
-          />
-
-          {/* Payment comment — CRITICAL */}
-          <div
-            className="rounded-2xl p-4 mb-4"
-            style={{
-              backgroundColor: isDark ? "#2a2218" : "#fff8ed",
-              border: `1.5px solid ${isDark ? "#5a4a2a" : "#f0d890"}`,
-            }}
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <MessageSquare
-                size={16}
-                className="text-amber-400"
-              />
-              <span
-                className={`text-xs font-semibold ${isDark ? "text-amber-300" : "text-amber-700"}`}
-              >
-                Payment Comment (REQUIRED)
-              </span>
-            </div>
-            <p
-              className={`text-[11px] mb-3 ${isDark ? "text-amber-200/70" : "text-amber-800/70"}`}
+            <a
+              href={order.qrUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="w-full mb-4 flex items-center justify-center gap-2 py-4 rounded-2xl text-white text-sm font-semibold transition-all active:scale-[0.98]"
+              style={{ backgroundColor: accent }}
             >
-              You <strong>must</strong> include this comment in
-              your transfer so we can identify your payment:
-            </p>
-            <div className="flex items-center justify-between bg-black/10 rounded-xl px-4 py-3">
-              <span
-                className={`font-mono text-base font-bold ${isDark ? "text-amber-200" : "text-amber-900"}`}
+              <ExternalLink size={18} />
+              Open Payment Page
+            </a>
+
+            <div
+              className={`${colors.card} rounded-2xl p-4 mb-6 ${!isDark ? "shadow-sm" : ""}`}
+              style={isDark ? {} : { border: "1px solid #e8e3db" }}
+            >
+              <h4 className={`${colors.text} text-xs font-semibold mb-3`}>
+                How to pay:
+              </h4>
+              <div className="space-y-2.5">
+                {[
+                  'Tap "Open Payment Page" or scan the QR code',
+                  "Choose your payment method: card, SBP, or T-Pay",
+                  `Pay ${order.amount} ₽`,
+                  'Come back here and tap "I\'ve Paid"',
+                ].map((text, i) => (
+                  <div key={i} className="flex items-start gap-2.5">
+                    <div
+                      className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold"
+                      style={{ backgroundColor: `${accent}20`, color: accent }}
+                    >
+                      {i + 1}
+                    </div>
+                    <span className={`${colors.textSecondary} text-xs leading-relaxed`}>
+                      {text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        ) : (
+          /* ── Manual SBP transfer UI ── */
+          <>
+            {order.qrImageUrl && (
+              <motion.div
+                initial={{ y: 10, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ delay: 0.08 }}
+                className={`${colors.card} rounded-2xl p-4 mb-4 ${!isDark ? "shadow-sm" : ""}`}
+                style={isDark ? {} : { border: "1px solid #e8e3db" }}
               >
-                {order.paymentComment}
-              </span>
-              <button
-                onClick={() =>
-                  handleCopy(order.paymentComment, "comment")
-                }
-                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                <h3 className={`${colors.text} text-sm font-medium mb-1`}>
+                  Pay via SBP QR
+                </h3>
+                <p className={`${colors.textMuted} text-xs mb-3`}>
+                  Scan this QR code in your banking app.
+                </p>
+                <div className="flex items-center justify-center rounded-xl p-3 mb-3 bg-white">
+                  <img
+                    src={order.qrImageUrl}
+                    alt="SBP QR code"
+                    className="w-52 h-52 object-contain"
+                  />
+                </div>
+                {order.qrUrl && (
+                  <a
+                    href={order.qrUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs underline"
+                    style={{ color: accent }}
+                  >
+                    Open payment link
+                  </a>
+                )}
+              </motion.div>
+            )}
+
+            {/* Payment details */}
+            <motion.div
+              initial={{ y: 10, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.1 }}
+            >
+              <h3 className={`${colors.text} text-sm font-medium mb-3`}>
+                Transfer Details
+              </h3>
+              <p className={`${colors.textMuted} text-xs mb-4 leading-relaxed`}>
+                Open your banking app, select{" "}
+                <strong>SBP transfer by phone number</strong>, and enter
+                the details below:
+              </p>
+
+              <PaymentDetailRow
+                icon={<Phone size={16} />}
+                label="Phone Number"
+                value={order.recipient.phone}
+                displayValue={formatPhone(order.recipient.phone)}
+                onCopy={handleCopy}
+                copied={copiedField === "phone"}
+                fieldId="phone"
+                colors={colors}
+                isDark={isDark}
+                accent={accent}
+              />
+              <PaymentDetailRow
+                icon={<Building2 size={16} />}
+                label="Bank"
+                value={order.recipient.bankName}
+                displayValue={order.recipient.bankName}
+                onCopy={handleCopy}
+                copied={copiedField === "bank"}
+                fieldId="bank"
+                colors={colors}
+                isDark={isDark}
+                accent={accent}
+              />
+              <PaymentDetailRow
+                icon={<Banknote size={16} />}
+                label="Amount"
+                value={`${order.amount}`}
+                displayValue={`${order.amount} ₽`}
+                onCopy={handleCopy}
+                copied={copiedField === "amount"}
+                fieldId="amount"
+                colors={colors}
+                isDark={isDark}
+                accent={accent}
+              />
+
+              {/* Payment comment — CRITICAL */}
+              <div
+                className="rounded-2xl p-4 mb-4"
                 style={{
-                  backgroundColor:
-                    copiedField === "comment"
-                      ? accent
-                      : isDark
-                        ? "#444"
-                        : "#e8e3db",
-                  color:
-                    copiedField === "comment"
-                      ? "#fff"
-                      : isDark
-                        ? "#ddd"
-                        : "#555",
+                  backgroundColor: isDark ? "#2a2218" : "#fff8ed",
+                  border: `1.5px solid ${isDark ? "#5a4a2a" : "#f0d890"}`,
                 }}
               >
-                {copiedField === "comment" ? (
-                  <Check size={14} />
-                ) : (
-                  <Copy size={14} />
-                )}
-                {copiedField === "comment" ? "Copied!" : "Copy"}
-              </button>
-            </div>
-          </div>
-        </motion.div>
-
-        {/* Steps indicator */}
-        <motion.div
-          initial={{ y: 10, opacity: 0 }}
-          animate={{ y: 0, opacity: 1 }}
-          transition={{ delay: 0.15 }}
-          className={`${colors.card} rounded-2xl p-4 mb-6 ${!isDark ? "shadow-sm" : ""}`}
-          style={isDark ? {} : { border: "1px solid #e8e3db" }}
-        >
-          <h4
-            className={`${colors.text} text-xs font-semibold mb-3`}
-          >
-            Steps:
-          </h4>
-          <div className="space-y-2.5">
-            {[
-              "Open your bank app (Tinkoff, Sber, etc.)",
-              "Choose 'Transfer by phone' → SBP",
-              `Enter phone: ${formatPhone(order.recipient.phone)}`,
-              `Select bank: ${order.recipient.bankName}`,
-              `Enter amount: ${order.amount} ₽`,
-              `Add comment: ${order.paymentComment}`,
-              "Send the transfer",
-              'Come back here and tap "I\'ve Paid"',
-            ].map((text, i) => (
-              <div key={i} className="flex items-start gap-2.5">
-                <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold"
-                  style={{
-                    backgroundColor: `${accent}20`,
-                    color: accent,
-                  }}
-                >
-                  {i + 1}
+                <div className="flex items-center gap-2 mb-2">
+                  <MessageSquare size={16} className="text-amber-400" />
+                  <span
+                    className={`text-xs font-semibold ${isDark ? "text-amber-300" : "text-amber-700"}`}
+                  >
+                    Payment Comment (REQUIRED)
+                  </span>
                 </div>
-                <span
-                  className={`${colors.textSecondary} text-xs leading-relaxed`}
+                <p
+                  className={`text-[11px] mb-3 ${isDark ? "text-amber-200/70" : "text-amber-800/70"}`}
                 >
-                  {text}
-                </span>
+                  You <strong>must</strong> include this comment in your
+                  transfer so we can identify your payment:
+                </p>
+                <div className="flex items-center justify-between bg-black/10 rounded-xl px-4 py-3">
+                  <span
+                    className={`font-mono text-base font-bold ${isDark ? "text-amber-200" : "text-amber-900"}`}
+                  >
+                    {order.paymentComment}
+                  </span>
+                  <button
+                    onClick={() => handleCopy(order.paymentComment, "comment")}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+                    style={{
+                      backgroundColor:
+                        copiedField === "comment"
+                          ? accent
+                          : isDark
+                            ? "#444"
+                            : "#e8e3db",
+                      color:
+                        copiedField === "comment"
+                          ? "#fff"
+                          : isDark
+                            ? "#ddd"
+                            : "#555",
+                    }}
+                  >
+                    {copiedField === "comment" ? (
+                      <Check size={14} />
+                    ) : (
+                      <Copy size={14} />
+                    )}
+                    {copiedField === "comment" ? "Copied!" : "Copy"}
+                  </button>
+                </div>
               </div>
-            ))}
-          </div>
-        </motion.div>
+            </motion.div>
+
+            {/* Steps indicator */}
+            <motion.div
+              initial={{ y: 10, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: 0.15 }}
+              className={`${colors.card} rounded-2xl p-4 mb-6 ${!isDark ? "shadow-sm" : ""}`}
+              style={isDark ? {} : { border: "1px solid #e8e3db" }}
+            >
+              <h4 className={`${colors.text} text-xs font-semibold mb-3`}>
+                Steps:
+              </h4>
+              <div className="space-y-2.5">
+                {[
+                  "Open your bank app (Tinkoff, Sber, etc.)",
+                  "Choose 'Transfer by phone' → SBP",
+                  `Enter phone: ${formatPhone(order.recipient.phone)}`,
+                  `Select bank: ${order.recipient.bankName}`,
+                  `Enter amount: ${order.amount} ₽`,
+                  `Add comment: ${order.paymentComment}`,
+                  "Send the transfer",
+                  'Come back here and tap "I\'ve Paid"',
+                ].map((text, i) => (
+                  <div key={i} className="flex items-start gap-2.5">
+                    <div
+                      className="w-5 h-5 rounded-full flex items-center justify-center flex-shrink-0 text-[10px] font-bold"
+                      style={{ backgroundColor: `${accent}20`, color: accent }}
+                    >
+                      {i + 1}
+                    </div>
+                    <span
+                      className={`${colors.textSecondary} text-xs leading-relaxed`}
+                    >
+                      {text}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </>
+        )}
       </div>
 
       {/* Bottom action */}
@@ -711,12 +752,12 @@ export function SBPPaymentScreen({
           style={{ backgroundColor: accent }}
         >
           <CheckCircle2 size={18} />
-          I've Paid via SBP
+          {isLinkPayment ? "I've Paid" : "I've Paid via SBP"}
         </button>
-        <p
-          className={`text-center text-[10px] ${colors.textDimmed} mt-3`}
-        >
-          Only confirm after completing the SBP transfer
+        <p className={`text-center text-[10px] ${colors.textDimmed} mt-3`}>
+          {isLinkPayment
+            ? "Only confirm after completing the payment"
+            : "Only confirm after completing the SBP transfer"}
         </p>
       </div>
     </div>
