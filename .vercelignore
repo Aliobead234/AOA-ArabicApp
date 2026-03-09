@@ -1,0 +1,6 @@
+microservices
+supabase
+node_modules
+dist
+dev.log
+dev.err

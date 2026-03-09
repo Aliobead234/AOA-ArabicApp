@@ -11,6 +11,7 @@ import { ExploreScreen }     from './components/ExploreScreen';
 import { YourWordsScreen }   from './components/YourWordsScreen';
 import { FolderWordsScreen } from './components/FolderWordsScreen';
 import { PaymentsPage }      from './pages/PaymentsPage';
+import { TochkaCallbackPage } from './pages/TochkaCallbackPage';
 
 const basename =
     import.meta.env.BASE_URL === '/'
@@ -19,6 +20,8 @@ const basename =
 
 export const router = createBrowserRouter(
     [
+      // Developer-only: Tochka OAuth2 callback (outside app layout/auth)
+      { path: 'tochka/callback', Component: TochkaCallbackPage },
       {
         path: '/',
         Component: RootLayout,

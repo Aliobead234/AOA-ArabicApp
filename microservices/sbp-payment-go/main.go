@@ -135,9 +135,11 @@ type Config struct {
 	SBPProviderTimeout   time.Duration
 	// Tochka Bank acquiring
 	TochkaJWTToken      string
+	TochkaClientID      string
 	TochkaCustomerCode  string
 	TochkaPaymentMode   string // "card", "sbp", "tinkoff"
 	TochkaWebhookKeyURL string
+	TochkaRedirectURL   string
 }
 
 type AuthUser struct {
@@ -249,7 +251,13 @@ func main() {
 		log.Fatalf("config error: %v", err)
 	}
 
-	db, err := sql.Open("pgx", cfg.DatabaseURL)
+	dbConnURL := cfg.DatabaseURL
+	if strings.Contains(dbConnURL, "?") {
+		dbConnURL += "&default_query_exec_mode=simple_protocol"
+	} else {
+		dbConnURL += "?default_query_exec_mode=simple_protocol"
+	}
+	db, err := sql.Open("pgx", dbConnURL)
 	if err != nil {
 		log.Fatalf("db open error: %v", err)
 	}
@@ -287,6 +295,13 @@ func main() {
 	})
 
 	router.POST("/api/v1/provider/webhook/sbp", providerWebhookHandler(db, cfg))
+
+	// Tochka OAuth2 — browser-only, no auth middleware
+	if cfg.SBPProviderMode == "tochka" {
+		router.GET("/tochka/auth", tochkaAuthHandler(cfg))
+		router.GET("/tochka/callback", tochkaCallbackHandler(cfg))
+		router.POST("/tochka/exchange", tochkaExchangeHandler(cfg))
+	}
 
 	api := router.Group("/api/v1")
 	api.Use(authMiddleware(cfg))
@@ -369,12 +384,17 @@ func loadConfig() (Config, error) {
 	}
 
 	tochkaJWT := strings.TrimSpace(os.Getenv("TOCHKA_JWT_TOKEN"))
+	tochkaClientID := strings.TrimSpace(os.Getenv("TOCHKA_CLIENT_ID"))
 	tochkaCode := strings.TrimSpace(os.Getenv("TOCHKA_CUSTOMER_CODE"))
 	tochkaPayMode := envOrDefault("TOCHKA_PAYMENT_MODE", "card")
 	tochkaKeyURL := envOrDefault("TOCHKA_WEBHOOK_KEY_URL", "https://enter.tochka.com/doc/openapi/static/keys/public")
+	tochkaRedirectURL := envOrDefault("TOCHKA_REDIRECT_URL", "http://localhost:8081/tochka/callback")
 	if providerMode == "tochka" {
 		if tochkaJWT == "" {
 			return Config{}, errors.New("TOCHKA_JWT_TOKEN is required when SBP_PROVIDER_MODE=tochka")
+		}
+		if tochkaClientID == "" {
+			return Config{}, errors.New("TOCHKA_CLIENT_ID is required when SBP_PROVIDER_MODE=tochka")
 		}
 		if tochkaCode == "" {
 			return Config{}, errors.New("TOCHKA_CUSTOMER_CODE is required when SBP_PROVIDER_MODE=tochka")
@@ -406,9 +426,11 @@ func loadConfig() (Config, error) {
 		SBPWebhookSecret:     strings.TrimSpace(os.Getenv("SBP_WEBHOOK_SECRET")),
 		SBPProviderTimeout:   time.Duration(providerTimeoutSeconds) * time.Second,
 		TochkaJWTToken:       tochkaJWT,
+		TochkaClientID:       tochkaClientID,
 		TochkaCustomerCode:   tochkaCode,
 		TochkaPaymentMode:    tochkaPayMode,
 		TochkaWebhookKeyURL:  tochkaKeyURL,
+		TochkaRedirectURL:    tochkaRedirectURL,
 	}, nil
 }
 
@@ -958,12 +980,19 @@ func createSBPQRMock(cfg Config, orderID string, plan Plan, paymentComment strin
 // createTochkaPaymentLink calls POST /acquiring/v1.0/payments and returns a
 // clickable/scannable payment URL that accepts card, SBP, and T-Pay.
 func createTochkaPaymentLink(ctx context.Context, cfg Config, orderID string, plan Plan) (sbpQRData, error) {
+	accessToken, err := getTochkaAccessToken(cfg)
+	if err != nil {
+		return sbpQRData{}, fmt.Errorf("tochka token: %w", err)
+	}
+
 	// Embed orderID in "purpose" — Tochka echoes it back in the webhook payload.
 	body := map[string]any{
-		"customerCode": cfg.TochkaCustomerCode,
-		"amount":       float64(plan.PriceRub),
-		"purpose":      orderID,
-		"paymentMode":  cfg.TochkaPaymentMode,
+		"Data": map[string]any{
+			"customerCode": cfg.TochkaCustomerCode,
+			"amount":       float64(plan.PriceRub),
+			"purpose":      orderID,
+			"paymentMode":  []string{cfg.TochkaPaymentMode},
+		},
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -975,14 +1004,14 @@ func createTochkaPaymentLink(ctx context.Context, cfg Config, orderID string, pl
 
 	req, err := http.NewRequestWithContext(
 		reqCtx, http.MethodPost,
-		"https://enter.tochka.com/api/acquiring/v1.0/payments",
+		"https://enter.tochka.com/uapi/acquiring/v1.0/payments",
 		strings.NewReader(string(bodyBytes)),
 	)
 	if err != nil {
 		return sbpQRData{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+cfg.TochkaJWTToken)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
 
 	client := &http.Client{Timeout: cfg.SBPProviderTimeout}
 	resp, err := client.Do(req)
@@ -998,26 +1027,28 @@ func createTochkaPaymentLink(ctx context.Context, cfg Config, orderID string, pl
 	}
 
 	var result struct {
-		OperationID string `json:"operationId"`
-		PaymentURL  string `json:"paymentUrl"`
-		Status      string `json:"status"`
+		Data struct {
+			OperationID string `json:"operationId"`
+			PaymentURL  string `json:"paymentUrl"`
+			Status      string `json:"status"`
+		} `json:"Data"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return sbpQRData{}, fmt.Errorf("tochka response parse error: %w", err)
 	}
-	if result.PaymentURL == "" {
+	if result.Data.PaymentURL == "" {
 		return sbpQRData{}, errors.New("tochka did not return a paymentUrl")
 	}
 
 	// Generate a QR code so users can scan on mobile; link is also clickable.
-	imageURL, _ := generateQRDataURL(result.PaymentURL)
+	imageURL, _ := generateQRDataURL(result.Data.PaymentURL)
 
 	return sbpQRData{
-		Payload:         result.PaymentURL,
-		URL:             result.PaymentURL,
+		Payload:         result.Data.PaymentURL,
+		URL:             result.Data.PaymentURL,
 		ImageURL:        imageURL,
-		ProviderOrderID: result.OperationID,
-		ProviderStatus:  result.Status,
+		ProviderOrderID: result.Data.OperationID,
+		ProviderStatus:  result.Data.Status,
 	}, nil
 }
 
@@ -1116,6 +1147,265 @@ func verifyRS256JWT(tokenString string, publicKeyPEM []byte) (map[string]any, er
 		return nil, fmt.Errorf("invalid JWT payload JSON: %w", err)
 	}
 	return claims, nil
+}
+
+// ── Tochka OAuth2 ─────────────────────────────────────────────────────────────
+
+const (
+	tochkaAuthURL     = "https://enter.tochka.com/uapi/oauth2/v2.0/authorize"
+	tochkaTokenURL    = "https://enter.tochka.com/uapi/oauth2/v2.0/token"
+	tochkaOAuthScopes = "openid"
+	tochkaTokenFile   = ".tochka_token.json"
+)
+
+type tochkaOAuthToken struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	ExpiresAt    time.Time `json:"expires_at"`
+}
+
+var tochkaOAuth struct {
+	sync.RWMutex
+	token  *tochkaOAuthToken
+	states map[string]time.Time // state → expiry
+}
+
+func init() {
+	tochkaOAuth.states = make(map[string]time.Time)
+	if data, err := os.ReadFile(tochkaTokenFile); err == nil {
+		var t tochkaOAuthToken
+		if json.Unmarshal(data, &t) == nil && t.AccessToken != "" {
+			tochkaOAuth.token = &t
+			log.Printf("tochka: loaded saved OAuth2 token (expires %s)", t.ExpiresAt.Format(time.RFC3339))
+		}
+	}
+}
+
+func saveTochkaOAuthToken(t *tochkaOAuthToken) {
+	tochkaOAuth.Lock()
+	tochkaOAuth.token = t
+	tochkaOAuth.Unlock()
+	if data, err := json.MarshalIndent(t, "", "  "); err == nil {
+		_ = os.WriteFile(tochkaTokenFile, data, 0600)
+	}
+}
+
+func getTochkaAccessToken(cfg Config) (string, error) {
+	tochkaOAuth.RLock()
+	tok := tochkaOAuth.token
+	tochkaOAuth.RUnlock()
+
+	if tok == nil {
+		return "", errors.New("no Tochka OAuth2 token — open http://localhost:8081/tochka/auth in your browser to authorize")
+	}
+	// Valid with 60s buffer
+	if time.Now().UTC().Add(60 * time.Second).Before(tok.ExpiresAt) {
+		return tok.AccessToken, nil
+	}
+	// Try refresh
+	if tok.RefreshToken != "" {
+		newTok, err := exchangeTochkaToken(cfg, url.Values{
+			"grant_type":    {"refresh_token"},
+			"refresh_token": {tok.RefreshToken},
+			"client_id":     {cfg.TochkaClientID},
+			"client_secret": {cfg.TochkaJWTToken},
+		})
+		if err == nil {
+			saveTochkaOAuthToken(newTok)
+			return newTok.AccessToken, nil
+		}
+		log.Printf("tochka: token refresh failed: %v", err)
+	}
+	return "", errors.New("Tochka OAuth2 token expired — open http://localhost:8081/tochka/auth to re-authorize")
+}
+
+func exchangeTochkaToken(cfg Config, vals url.Values) (*tochkaOAuthToken, error) {
+	req, err := http.NewRequest(http.MethodPost, tochkaTokenURL, strings.NewReader(vals.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer "+cfg.TochkaJWTToken)
+
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("token parse error: %w", err)
+	}
+	if result.AccessToken == "" {
+		return nil, fmt.Errorf("empty access_token: %s", string(body))
+	}
+	expiresIn := result.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 3600
+	}
+	return &tochkaOAuthToken{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		ExpiresAt:    time.Now().UTC().Add(time.Duration(expiresIn) * time.Second),
+	}, nil
+}
+
+// tochkaAuthHandler gets a client_credentials token then redirects the browser
+// to Tochka's OAuth2 consent page with that token in the URL.
+func tochkaAuthHandler(cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Step 1: get a short-lived access token via client_credentials
+		clientTok, err := exchangeTochkaToken(cfg, url.Values{
+			"grant_type": {"client_credentials"},
+			"client_id":  {cfg.TochkaClientID},
+			"scope":      {tochkaOAuthScopes},
+		})
+		if err != nil {
+			log.Printf("tochka auth: client_credentials failed: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "failed to get client token", "detail": err.Error()})
+			return
+		}
+
+		// Step 2: generate CSRF state
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state"})
+			return
+		}
+		state := hex.EncodeToString(b)
+
+		tochkaOAuth.Lock()
+		now := time.Now()
+		for s, exp := range tochkaOAuth.states {
+			if now.After(exp) {
+				delete(tochkaOAuth.states, s)
+			}
+		}
+		tochkaOAuth.states[state] = now.Add(10 * time.Minute)
+		tochkaOAuth.Unlock()
+
+		// Step 3: redirect to consent page with fresh access_token
+		params := url.Values{
+			"response_type": {"code"},
+			"client_id":     {cfg.TochkaClientID},
+			"redirect_uri":  {cfg.TochkaRedirectURL},
+			"scope":         {tochkaOAuthScopes},
+			"state":         {state},
+			"access_token":  {clientTok.AccessToken},
+		}
+		c.Redirect(http.StatusFound, tochkaAuthURL+"?"+params.Encode())
+	}
+}
+
+// tochkaCallbackHandler receives the OAuth2 code from Tochka and exchanges it for a token.
+func tochkaCallbackHandler(cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if errParam := c.Query("error"); errParam != "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":       "tochka denied: " + errParam,
+				"description": c.Query("error_description"),
+			})
+			return
+		}
+
+		code := c.Query("code")
+		state := c.Query("state")
+		if code == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "missing code"})
+			return
+		}
+
+		tochkaOAuth.Lock()
+		exp, ok := tochkaOAuth.states[state]
+		if ok {
+			delete(tochkaOAuth.states, state)
+		}
+		tochkaOAuth.Unlock()
+
+		if !ok || time.Now().After(exp) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired state"})
+			return
+		}
+
+		tok, err := exchangeTochkaToken(cfg, url.Values{
+			"grant_type":    {"authorization_code"},
+			"code":          {code},
+			"redirect_uri":  {cfg.TochkaRedirectURL},
+			"client_id":     {cfg.TochkaClientID},
+			"client_secret": {cfg.TochkaJWTToken},
+		})
+		if err != nil {
+			log.Printf("tochka: token exchange failed: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "token exchange failed", "detail": err.Error()})
+			return
+		}
+
+		saveTochkaOAuthToken(tok)
+		log.Printf("tochka: OAuth2 token saved, expires %s", tok.ExpiresAt.Format(time.RFC3339))
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "authorized",
+			"expires_at": tok.ExpiresAt.Format(time.RFC3339),
+			"message":    "Tochka acquiring access granted. You can close this tab.",
+		})
+	}
+}
+
+// tochkaExchangeHandler is called by the Vercel frontend after Tochka redirects
+// to https://aoa-arabic-app.vercel.app/tochka/callback. The frontend posts the
+// code + state here so the backend can complete the token exchange.
+func tochkaExchangeHandler(cfg Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			Code  string `json:"code"`
+			State string `json:"state"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" || req.State == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "code and state are required"})
+			return
+		}
+
+		tochkaOAuth.Lock()
+		exp, ok := tochkaOAuth.states[req.State]
+		if ok {
+			delete(tochkaOAuth.states, req.State)
+		}
+		tochkaOAuth.Unlock()
+
+		if !ok || time.Now().After(exp) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid or expired state"})
+			return
+		}
+
+		tok, err := exchangeTochkaToken(cfg, url.Values{
+			"grant_type":   {"authorization_code"},
+			"code":         {req.Code},
+			"redirect_uri": {cfg.TochkaRedirectURL},
+			"client_id":    {cfg.TochkaClientID},
+			"client_secret": {cfg.TochkaJWTToken},
+		})
+		if err != nil {
+			log.Printf("tochka: exchange failed: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "token exchange failed", "detail": err.Error()})
+			return
+		}
+
+		saveTochkaOAuthToken(tok)
+		log.Printf("tochka: OAuth2 token saved via frontend callback, expires %s", tok.ExpiresAt.Format(time.RFC3339))
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "authorized",
+			"expires_at": tok.ExpiresAt.Format(time.RFC3339),
+			"message":    "Tochka acquiring access granted.",
+		})
+	}
 }
 
 // ── end Tochka Bank ───────────────────────────────────────────────────────────
