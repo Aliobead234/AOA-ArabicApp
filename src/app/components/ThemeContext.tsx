@@ -2,6 +2,7 @@ import {
   createContext,
   useContext,
   useState,
+  useEffect,
   type ReactNode,
 } from "react";
 
@@ -39,9 +40,13 @@ export function ThemeProvider({
 }: {
   children: ReactNode;
 }) {
-  const [theme, setTheme] = useState<Theme>("light");
+  const [theme, setTheme] = useState<Theme>("dark");
 
   const isDark = theme === "dark";
+
+  useEffect(() => {
+    document.documentElement.style.backgroundColor = isDark ? "#1a1a1a" : "#faf7f2";
+  }, [isDark]);
 
   const colors = isDark
     ? {
