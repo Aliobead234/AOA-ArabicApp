@@ -1,4 +1,4 @@
-import { ArrowLeft, Check, ImagePlus } from "lucide-react";
+import { ArrowLeft, Check } from "lucide-react";
 import { useNavigate } from "react-router";
 import { useTheme, appThemes, type AppTheme } from "./ThemeContext";
 
@@ -38,11 +38,7 @@ export function ThemesScreen() {
               {/* Preview swatch */}
               <div
                 className="relative h-28 flex flex-col justify-between p-3"
-                style={{
-                  background: t.bgImage
-                    ? `linear-gradient(to top, ${t.bg} 20%, transparent), url(${t.bgImage}) center/cover`
-                    : t.bg,
-                }}
+                style={{ background: t.bg }}
               >
                 {/* Active check */}
                 {isActive && (
@@ -51,13 +47,6 @@ export function ThemesScreen() {
                     style={{ backgroundColor: accentColor }}
                   >
                     <Check size={11} className="text-white" />
-                  </div>
-                )}
-
-                {/* Image badge if theme has bg image */}
-                {t.bgImage && (
-                  <div className="absolute top-2.5 left-2.5 w-5 h-5 rounded-md flex items-center justify-center bg-black/40">
-                    <ImagePlus size={10} className="text-white/70" />
                   </div>
                 )}
 
