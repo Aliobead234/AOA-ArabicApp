@@ -52,9 +52,9 @@ func loadConfig() (Config, error) {
 		return Config{}, errors.New("SUPABASE_ANON_KEY is required")
 	}
 
-	ttlMinutes := envIntOrDefault("ORDER_TTL_MINUTES", 30)
-	if ttlMinutes < 5 {
-		ttlMinutes = 5
+	ttlMinutes := envIntOrDefault("ORDER_TTL_MINUTES", 2)
+	if ttlMinutes < 1 {
+		ttlMinutes = 1
 	}
 
 	monthlyDays := envIntOrDefault("MONTHLY_DURATION_DAYS", 30)
