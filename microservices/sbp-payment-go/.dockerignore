@@ -1,0 +1,7 @@
+*.exe
+*.exe~
+.env
+ngrok.exe
+test.sh
+schema.sql
+.env.example
