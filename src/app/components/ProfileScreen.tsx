@@ -131,22 +131,33 @@ export function ProfileScreen() {
       ) : (
         <>
           {/* Profile Card */}
-          <div className={`${colors.creamCard} rounded-3xl p-6 mb-6 ${!isDark ? "shadow-md shadow-black/5" : ""}`}>
+          <div
+            className={`rounded-3xl p-6 mb-6 border ${
+              isDark
+                ? "bg-gradient-to-br from-[#2a2418] to-[#1f1a14] border-[#3d3425]"
+                : "bg-gradient-to-br from-[#fdf6e9] to-[#f5ead4] border-[#e8d9b8] shadow-md shadow-black/5"
+            }`}
+          >
             <div className="flex items-center gap-4 mb-4">
               {user?.user_metadata?.avatar_url ? (
                 <img
                   src={user.user_metadata.avatar_url}
                   alt=""
-                  className="w-14 h-14 rounded-full object-cover"
+                  className="w-14 h-14 rounded-full object-cover ring-2 ring-[#c9a84c]/40"
                 />
               ) : (
-                <div className="w-14 h-14 rounded-full bg-[#d4cfc7] flex items-center justify-center">
-                  <span className="text-[#1a1a1a] text-xl">{avatarLetter}</span>
+                <div className="w-14 h-14 rounded-full bg-gradient-to-br from-[#c9a84c] to-[#b8943f] flex items-center justify-center ring-2 ring-[#c9a84c]/30">
+                  <span className="text-white text-xl font-medium">{avatarLetter}</span>
                 </div>
               )}
-              <div>
-                <h3 className="text-[#1a1a1a] text-lg">{displayName}</h3>
-                <p className="text-[#666] text-sm">{user ? "Signed in" : "Free plan"}</p>
+              <div className="flex-1 min-w-0">
+                <h3 className={`${isDark ? "text-[#f0e6d0]" : "text-[#2a2010]"} text-lg`}>{displayName}</h3>
+                {user?.email && (
+                  <p className={`${isDark ? "text-[#8a7d6b]" : "text-[#8a7a5a]"} text-sm truncate`}>{user.email}</p>
+                )}
+                {!user && (
+                  <p className={`${isDark ? "text-[#8a7d6b]" : "text-[#8a7a5a]"} text-sm`}>Free plan</p>
+                )}
               </div>
             </div>
 
@@ -160,29 +171,30 @@ export function ProfileScreen() {
                 <span className="text-sm">Sign in with Google</span>
               </button>
             ) : hasPurchased && subscription ? (
-              <div className="text-center">
-                <div className="flex items-center justify-center gap-2 mb-1">
-                  <Crown size={16} style={{ color: accentColor }} />
-                  <span className="text-[#1a1a1a] text-sm font-semibold">
-                    {subscription.planName} Plan
-                  </span>
-                </div>
+              <div className={`rounded-xl py-2.5 px-4 flex items-center justify-center gap-2 ${
+                isDark ? "bg-[#352d1a]" : "bg-[#f0e4c4]"
+              }`}>
+                <Crown size={16} className="text-[#c9a84c]" />
+                <span className={`${isDark ? "text-[#e8d9a8]" : "text-[#6b5a2e]"} text-sm font-semibold`}>
+                  {subscription.planName} Plan
+                </span>
                 {subscription.expiresAt ? (
-                  <p className="text-[#666] text-xs">
-                    Renews {new Date(subscription.expiresAt).toLocaleDateString("ru-RU")}
-                  </p>
+                  <span className={`${isDark ? "text-[#8a7d6b]" : "text-[#8a7a5a]"} text-sm font-semibold ml-1`}>
+                    · Renews {new Date(subscription.expiresAt).toLocaleDateString("ru-RU")}
+                  </span>
                 ) : (
-                  <p className="text-[#666] text-xs">Lifetime access</p>
+                  <span className={`${isDark ? "text-[#8a7d6b]" : "text-[#8a7a5a]"} text-sm font-semibold ml-1`}>
+                    · Lifetime
+                  </span>
                 )}
               </div>
             ) : (
               <button
                 onClick={() => navigate("/payments")}
-                className="w-full text-white py-3 rounded-xl flex items-center justify-center gap-2"
-                style={{ backgroundColor: accentColor }}
+                className="w-full py-3 rounded-xl flex items-center justify-center gap-2 bg-gradient-to-r from-[#c9a84c] to-[#b8943f] text-white"
               >
                 <Crown size={16} />
-                <span className="text-sm">Go Premium</span>
+                <span className="text-sm font-medium">Go Premium</span>
               </button>
             )}
           </div>
