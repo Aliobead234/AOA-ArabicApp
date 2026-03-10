@@ -65,9 +65,24 @@ const plans: Plan[] = [
     icon: Crown,
   },
   {
+    id: "yearly",
+    name: "Yearly",
+    price: "2 399 ₽",
+    priceNote: "Save 17% vs monthly",
+    period: "/year",
+    description: "Best value for committed learners.",
+    features: [
+      "Everything in Pro",
+      "12 months of full access",
+      "Priority support",
+      "New decks & features included",
+    ],
+    icon: Zap,
+  },
+  {
     id: "lifetime",
     name: "Lifetime",
-    price: "2999 ₽",
+    price: "2 999 ₽",
     period: "one-time",
     description: "Pay once, learn forever.",
     features: [

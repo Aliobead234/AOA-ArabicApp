@@ -60,9 +60,7 @@ interface PaymentRequestError extends Error {
   fallbackEligible?: boolean;
 }
 
-const DEFAULT_BACKEND_MODE: PaymentBackendMode = import.meta.env.DEV
-  ? "microservice"
-  : "supabase";
+const DEFAULT_BACKEND_MODE: PaymentBackendMode = "microservice";
 
 const PAYMENT_BACKEND_MODE = (import.meta.env.VITE_PAYMENT_BACKEND_MODE ??
   DEFAULT_BACKEND_MODE) as PaymentBackendMode;

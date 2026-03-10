@@ -23,7 +23,7 @@ export function ProfileScreen() {
   const topCategories = categories.slice(0, 4);
   const { colors, isDark, toggleTheme } = useTheme();
   const { user, loading, signInWithGoogle, signOut } = useAuth();
-  const { hasPurchased } = usePurchase();
+  const { hasPurchased, subscription } = usePurchase();
   const navigate = useNavigate();
 
   const accentColor = isDark ? "#7ec8a9" : "#5aab8b";
@@ -159,6 +159,22 @@ export function ProfileScreen() {
                 <LogIn size={16} />
                 <span className="text-sm">Sign in with Google</span>
               </button>
+            ) : hasPurchased && subscription ? (
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-2 mb-1">
+                  <Crown size={16} style={{ color: accentColor }} />
+                  <span className="text-[#1a1a1a] text-sm font-semibold">
+                    {subscription.planName} Plan
+                  </span>
+                </div>
+                {subscription.expiresAt ? (
+                  <p className="text-[#666] text-xs">
+                    Renews {new Date(subscription.expiresAt).toLocaleDateString("ru-RU")}
+                  </p>
+                ) : (
+                  <p className="text-[#666] text-xs">Lifetime access</p>
+                )}
+              </div>
             ) : (
               <button
                 onClick={() => navigate("/payments")}

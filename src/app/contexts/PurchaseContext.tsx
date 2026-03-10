@@ -52,7 +52,8 @@ export function PurchaseProvider({ children }: { children: ReactNode }) {
         setSubscription(data.subscription?.status === 'active' ? data.subscription : null);
       } catch (err) {
         console.error('Failed to fetch subscription:', err);
-        setSubscription(null);
+        // Keep existing subscription state on network errors to avoid
+        // resetting premium status during temporary outages.
       } finally {
         lastRefreshAtRef.current = Date.now();
         setLoading(false);
