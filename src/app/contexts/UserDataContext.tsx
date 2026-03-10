@@ -11,7 +11,7 @@
  */
 
 import {
-    createContext, useContext, useEffect, useState,
+    createContext, useContext, useEffect, useState, useMemo,
     useCallback, useRef, type ReactNode,
 } from 'react';
 import { useAuth }     from './AuthContext';
@@ -105,13 +105,17 @@ export function UserDataProvider({ children }: { children: ReactNode }) {
     // ── Flashcard: favorites ───────────────────────────────────────────────────
 
     const toggleFavorite = useCallback(async (wordId: string) => {
-        if (!user || guestMode) {
-            setData((p) => { const s = new Set(p.favorites); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, favorites: [...s] }; });
-            return null;
-        }
+        // Optimistic — toggle UI immediately
+        setData((p) => { const s = new Set(p.favorites); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, favorites: [...s] }; });
+        if (!user || guestMode) return null;
         return enqueue(async () => {
             const r = await svc.toggleFavorite(user.id, wordId, hasPurchased);
-            if (r.ok) setData((p) => { const s = new Set(p.favorites); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, favorites: [...s], dataSizeB: r.dataSizeB }; });
+            if (r.ok) {
+                setData((p) => ({ ...p, dataSizeB: r.dataSizeB }));
+            } else {
+                // Rollback
+                setData((p) => { const s = new Set(p.favorites); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, favorites: [...s] }; });
+            }
             return r;
         });
     }, [user, guestMode, hasPurchased, enqueue]);
@@ -119,13 +123,17 @@ export function UserDataProvider({ children }: { children: ReactNode }) {
     // ── Flashcard: loved ───────────────────────────────────────────────────────
 
     const toggleLoved = useCallback(async (wordId: string) => {
-        if (!user || guestMode) {
-            setData((p) => { const s = new Set(p.loved); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, loved: [...s] }; });
-            return null;
-        }
+        // Optimistic — toggle UI immediately
+        setData((p) => { const s = new Set(p.loved); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, loved: [...s] }; });
+        if (!user || guestMode) return null;
         return enqueue(async () => {
             const r = await svc.toggleLoved(user.id, wordId, hasPurchased);
-            if (r.ok) setData((p) => { const s = new Set(p.loved); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, loved: [...s], dataSizeB: r.dataSizeB }; });
+            if (r.ok) {
+                setData((p) => ({ ...p, dataSizeB: r.dataSizeB }));
+            } else {
+                // Rollback
+                setData((p) => { const s = new Set(p.loved); s.has(wordId) ? s.delete(wordId) : s.add(wordId); return { ...p, loved: [...s] }; });
+            }
             return r;
         });
     }, [user, guestMode, hasPurchased, enqueue]);
@@ -243,10 +251,13 @@ export function UserDataProvider({ children }: { children: ReactNode }) {
 
     // ── Derived ────────────────────────────────────────────────────────────────
 
+    const favoritesSet = useMemo(() => new Set(data.favorites), [data.favorites]);
+    const lovedSet     = useMemo(() => new Set(data.loved),     [data.loved]);
+
     return (
         <UserDataContext.Provider value={{
-            favorites:           new Set(data.favorites),
-            loved:               new Set(data.loved),
+            favorites:           favoritesSet,
+            loved:               lovedSet,
             addedWords:          data.addedWords,
             customFolders:       data.customFolders,
             dataSizeB:           data.dataSizeB,
