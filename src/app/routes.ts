@@ -12,6 +12,7 @@ import { YourWordsScreen }   from './components/YourWordsScreen';
 import { FolderWordsScreen } from './components/FolderWordsScreen';
 import { PaymentsPage }      from './pages/PaymentsPage';
 import { TochkaCallbackPage } from './pages/TochkaCallbackPage';
+import { ThemesScreen }      from './components/ThemesScreen';
 
 const basename =
     import.meta.env.BASE_URL === '/'
@@ -43,6 +44,7 @@ export const router = createBrowserRouter(
                * /folder/loved      — shows all bookmark-toggled flashcard words
                */
               { path: 'folder/:type',     Component: FolderWordsScreen },
+              { path: 'themes',           Component: ThemesScreen      },
               { path: 'oauth/consent',    loader: () => redirect('/')  },
             ],
           },

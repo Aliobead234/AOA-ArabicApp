@@ -6,7 +6,7 @@ import {
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { categories } from "../data/flashcardData";
-import { useTheme } from "./ThemeContext";
+import { useTheme, type CardVariant } from "./ThemeContext";
 import { useAuth } from "../contexts/AuthContext";
 import { usePurchase } from "../contexts/PurchaseContext";
 
@@ -21,12 +21,13 @@ interface SettingItem {
 export function ProfileScreen() {
   const [showSettings, setShowSettings] = useState(false);
   const topCategories = categories.slice(0, 4);
-  const { colors, isDark, toggleTheme } = useTheme();
+  const { colors, isDark, toggleTheme, cardVariant, setCardVariant, appTheme, themeConfig } = useTheme();
   const { user, loading, signInWithGoogle, signOut } = useAuth();
   const { hasPurchased, subscription } = usePurchase();
   const navigate = useNavigate();
 
-  const accentColor = isDark ? "#7ec8a9" : "#5aab8b";
+  const accentColor = isDark ? themeConfig.accent : "#5aab8b";
+  const themeActive = appTheme !== "default";
   const cardImgBg = isDark ? "bg-[#333]" : "bg-[#f0ebe3]";
 
   const generalSettings: SettingItem[] = [
@@ -37,6 +38,7 @@ export function ProfileScreen() {
   ];
 
   const accountSettings: SettingItem[] = [
+    { icon: Palette, label: "Themes", action: () => navigate("/themes") },
     { icon: Shield, label: "Privacy" },
     { icon: FileText, label: "Terms and Conditions" },
     { icon: ExternalLink, label: "Rate the app" },
@@ -118,6 +120,66 @@ export function ProfileScreen() {
                 }`}
               />
             </button>
+          </div>
+
+          {/* Card appearance */}
+          <div className="mb-5">
+            <h4 className={`${colors.textDimmed} text-xs uppercase tracking-wider mb-2 px-1`}>Card appearance</h4>
+            <div className={`${colors.card} rounded-2xl p-4 ${!isDark ? "shadow-sm" : ""}`}>
+              <p className={`${colors.textMuted} text-xs mb-3`}>
+                {themeActive ? "Locked to Default while a theme is active" : "Choose how flashcards look"}
+              </p>
+              <div className={`flex gap-3 ${themeActive ? "opacity-50 pointer-events-none" : ""}`}>
+                {(["default", "notion", "classic"] as CardVariant[]).map((v) => {
+                  const isActive = cardVariant === v;
+                  return (
+                    <button
+                      key={v}
+                      onClick={() => setCardVariant(v)}
+                      className="flex-1 rounded-xl overflow-hidden transition-all active:scale-95"
+                      style={{
+                        border: `2px solid ${isActive ? accentColor : isDark ? "#333" : "#e0dbd3"}`,
+                      }}
+                    >
+                      {v === "default" ? (
+                        <div
+                          className="h-16 flex flex-col items-center justify-center gap-1.5"
+                          style={{ background: isDark ? "#1a1a1a" : "#faf7f2" }}
+                        >
+                          <div className="w-8 h-2 rounded-sm" style={{ background: isDark ? "#f0f0f022" : "#1a1a1a22" }} />
+                          <div className="w-12 h-3 rounded-sm" style={{ background: isDark ? "#f0f0f040" : "#1a1a1a40" }} />
+                          <div className="w-6 h-1.5 rounded-sm" style={{ background: isDark ? "#f0f0f015" : "#1a1a1a15" }} />
+                        </div>
+                      ) : v === "notion" ? (
+                        <div className="relative h-16 flex flex-col justify-center px-3" style={{ background: "#111" }}>
+                          <div className="absolute left-0 top-0 bottom-0 w-[2px]" style={{ background: "#7ec8a9" }} />
+                          <div className="flex items-center gap-1.5 mb-1.5 ml-1">
+                            <div className="w-6 h-2.5 rounded-sm" style={{ background: "#7ec8a920" }} />
+                          </div>
+                          <div className="ml-1 w-14 h-2.5 rounded-sm" style={{ background: "#f0f0f018" }} />
+                        </div>
+                      ) : (
+                        <div className={`h-16 flex flex-col items-center justify-center gap-1 ${isDark ? "bg-[#f5f0e8]" : "bg-[#f0ebe3]"}`}>
+                          <div className="w-10 h-2.5 rounded-sm bg-[#1a1a1a]/20" />
+                          <div className="w-6 h-2 rounded-sm bg-[#1a1a1a]/10" />
+                        </div>
+                      )}
+                      <div
+                        className="py-1.5 text-center"
+                        style={{ background: isActive ? `${accentColor}18` : isDark ? "#222" : "#faf8f5" }}
+                      >
+                        <span
+                          className="text-[11px] font-medium capitalize"
+                          style={{ color: isActive ? accentColor : isDark ? "#555" : "#aaa" }}
+                        >
+                          {v}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {renderSettingGroup("General", generalSettings)}
