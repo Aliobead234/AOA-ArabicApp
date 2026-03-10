@@ -4,104 +4,126 @@ import { useAuth } from "../contexts/AuthContext";
 import { usePurchase } from "../contexts/PurchaseContext";
 import { SBPPaymentScreen } from "../components/SBPPaymentScreen";
 import {
-  CreditCard,
-  Wallet,
-  Bitcoin,
-  Building2,
-  Check,
-  Crown,
-  Star,
-  Zap,
-  Lock,
-  LogIn,
-  ArrowLeft,
-  CheckCircle2,
+  Crown, Check, ArrowLeft, Zap, Infinity, LogIn,
+  BookOpen, Headphones, Brain, Sparkles, Building2,
+  CheckCircle2, ChevronRight, CreditCard, Wallet, Bitcoin,
 } from "lucide-react";
 import { useNavigate } from "react-router";
+
+interface PaymentMethod {
+  id: string;
+  name: string;
+  sub: string;
+  icon: React.ElementType;
+  available: boolean;
+  handler?: "sbp";
+}
+
+const paymentMethods: PaymentMethod[] = [
+  {
+    id: "sbp",
+    name: "СБП",
+    sub: "Система быстрых платежей",
+    icon: Building2,
+    available: true,
+    handler: "sbp",
+  },
+  {
+    id: "card",
+    name: "Card",
+    sub: "Visa / Mastercard — coming soon",
+    icon: CreditCard,
+    available: false,
+  },
+  {
+    id: "paypal",
+    name: "PayPal",
+    sub: "Coming soon",
+    icon: Wallet,
+    available: false,
+  },
+  {
+    id: "crypto",
+    name: "Crypto",
+    sub: "USDT / BTC — coming soon",
+    icon: Bitcoin,
+    available: false,
+  },
+];
 
 interface Plan {
   id: string;
   name: string;
   price: string;
-  priceNote?: string;
+  priceRaw: number;
   period: string;
-  description: string;
+  badge?: string;
+  badgeColor?: string;
+  perMonth?: string;
   features: string[];
-  popular?: boolean;
-  icon: typeof Star;
+  icon: React.ElementType;
+  gradient: string;
 }
 
 const plans: Plan[] = [
   {
-    id: "starter",
-    name: "Starter",
-    price: "299 ₽",
-    period: "one-time",
-    description: "Try out the basics with a single deck.",
-    features: [
-      "1 flashcard deck (50 cards)",
-      "Basic review mode",
-      "Progress tracking",
-      "Mobile-friendly",
-    ],
-    icon: Star,
-  },
-  {
     id: "pro",
-    name: "Pro",
+    name: "Monthly",
     price: "1 ₽",
-    priceNote: "Testing price",
+    priceRaw: 1,
     period: "/month",
-    description: "Full access for serious learners.",
+    perMonth: "1 ₽/mo",
     features: [
       "All flashcard decks",
       "Spaced repetition engine",
       "Audio pronunciation",
       "Offline access",
-      "Priority support",
-      "New decks monthly",
     ],
-    popular: true,
-    icon: Crown,
+    icon: Zap,
+    gradient: "linear-gradient(135deg, #7ec8a9 0%, #5aab8b 100%)",
   },
   {
     id: "yearly",
-    name: "Yearly",
+    name: "Annual",
     price: "2 399 ₽",
-    priceNote: "Save 17% vs monthly",
+    priceRaw: 2399,
     period: "/year",
-    description: "Best value for committed learners.",
+    badge: "Save 17%",
+    badgeColor: "#c9a84c",
+    perMonth: "200 ₽/mo",
     features: [
-      "Everything in Pro",
-      "12 months of full access",
+      "Everything in Monthly",
+      "12 months full access",
       "Priority support",
-      "New decks & features included",
+      "New decks & features",
     ],
-    icon: Zap,
+    icon: Crown,
+    gradient: "linear-gradient(135deg, #c9a84c 0%, #b8943f 100%)",
   },
   {
     id: "lifetime",
     name: "Lifetime",
     price: "2 999 ₽",
+    priceRaw: 2999,
     period: "one-time",
-    description: "Pay once, learn forever.",
+    badge: "Best deal",
+    badgeColor: "#a87ec8",
     features: [
-      "Everything in Pro",
-      "Lifetime updates",
+      "Everything in Annual",
+      "Pay once, learn forever",
       "Exclusive community access",
-      "Custom deck requests",
       "Early access to new features",
     ],
-    icon: Zap,
+    icon: Infinity,
+    gradient: "linear-gradient(135deg, #a87ec8 0%, #8a5cb0 100%)",
   },
 ];
 
-const paymentMethods = [
-  { id: "sbp", name: "СБП (SBP)", icon: Building2, available: true },
-  { id: "stripe", name: "Card (Stripe)", icon: CreditCard, available: false },
-  { id: "paypal", name: "PayPal", icon: Wallet, available: false },
-  { id: "crypto", name: "Crypto", icon: Bitcoin, available: false },
-  { id: "mir", name: "MIR Card", icon: CreditCard, available: false },
+const highlights = [
+  { icon: BookOpen, label: "500+ flashcards", sub: "Across all topics" },
+  { icon: Brain, label: "Spaced repetition", sub: "Science-backed learning" },
+  { icon: Headphones, label: "Audio pronunciation", sub: "Native speaker audio" },
+  { icon: Sparkles, label: "New content", sub: "Added every month" },
 ];
 
 export function PaymentsPage() {
@@ -109,45 +131,56 @@ export function PaymentsPage() {
   const { user, signInWithGoogle } = useAuth();
   const { hasPurchased, subscription } = usePurchase();
   const navigate = useNavigate();
-  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
-  const [selectedMethod, setSelectedMethod] = useState<string | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<string>("yearly");
+  const [selectedMethod, setSelectedMethod] = useState<string>("sbp");
   const [showSBPPayment, setShowSBPPayment] = useState(false);
 
   const accentColor = isDark ? "#7ec8a9" : "#5aab8b";
 
-  // If user already has active subscription
+  // Already subscribed
   if (hasPurchased && subscription) {
     return (
-      <div className={`flex flex-col h-full overflow-y-auto px-5 pt-12 pb-4 ${colors.bg}`}>
+      <div className="flex flex-col h-full overflow-y-auto px-5 pt-12 pb-8">
         <div className="flex items-center justify-between mb-6">
           <button onClick={() => navigate(-1)} className={colors.textMuted}>
             <ArrowLeft size={22} />
           </button>
-          <h2 className={`${colors.text} text-lg`}>Your Subscription</h2>
+          <h2 className={`${colors.text} text-lg`}>Subscription</h2>
           <div className="w-6" />
         </div>
 
-        <div className="flex-1 flex flex-col items-center justify-center px-4">
+        <div className="flex-1 flex flex-col items-center justify-center">
           <div
-            className="w-16 h-16 rounded-full flex items-center justify-center mb-4"
-            style={{ backgroundColor: `${accentColor}20` }}
+            className="w-20 h-20 rounded-full flex items-center justify-center mb-5"
+            style={{ background: "linear-gradient(135deg, #c9a84c 0%, #b8943f 100%)" }}
           >
-            <CheckCircle2 size={32} style={{ color: accentColor }} />
+            <Crown size={34} className="text-white" />
           </div>
-          <h3 className={`${colors.text} text-xl font-semibold mb-2`}>
-            {subscription.planName} Plan Active
+          <h3 className={`${colors.text} text-xl font-semibold mb-1`}>
+            {subscription.planName} Plan
           </h3>
-          <p className={`${colors.textMuted} text-sm text-center mb-1`}>
-            Order: {subscription.orderId}
-          </p>
-          {subscription.expiresAt && (
-            <p className={`${colors.textDimmed} text-xs text-center`}>
-              Expires: {new Date(subscription.expiresAt).toLocaleDateString("ru-RU")}
+          <p className={`${colors.textMuted} text-sm mb-1`}>Active subscription</p>
+          {subscription.expiresAt ? (
+            <p className={`${colors.textDimmed} text-xs mb-8`}>
+              Renews {new Date(subscription.expiresAt).toLocaleDateString("ru-RU")}
             </p>
+          ) : (
+            <p className={`${colors.textDimmed} text-xs mb-8`}>Lifetime access</p>
           )}
+
+          {/* Active features */}
+          <div className={`w-full rounded-2xl p-4 mb-6 ${isDark ? "bg-[#1e1e1e]" : "bg-[#f5f5f5]"}`}>
+            {highlights.map((h) => (
+              <div key={h.label} className="flex items-center gap-3 py-2">
+                <CheckCircle2 size={16} style={{ color: accentColor }} className="flex-shrink-0" />
+                <span className={`${colors.textSecondary} text-sm`}>{h.label}</span>
+              </div>
+            ))}
+          </div>
+
           <button
             onClick={() => navigate("/")}
-            className="mt-8 px-8 py-3 rounded-2xl text-white text-sm font-medium"
+            className="w-full py-3.5 rounded-2xl text-white text-sm font-medium"
             style={{ backgroundColor: accentColor }}
           >
             Continue Learning
@@ -157,7 +190,7 @@ export function PaymentsPage() {
     );
   }
 
-  // SBP Payment flow
+  // SBP payment flow
   if (showSBPPayment && selectedPlan) {
     const plan = plans.find((p) => p.id === selectedPlan);
     return (
@@ -173,204 +206,265 @@ export function PaymentsPage() {
     );
   }
 
-  const handleProceed = () => {
-    if (selectedMethod === "sbp" && selectedPlan) {
-      setShowSBPPayment(true);
-    }
-  };
+  const selected = plans.find((p) => p.id === selectedPlan)!;
 
   return (
-    <div className="flex flex-col h-full overflow-y-auto px-5 pt-12 pb-4">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <button onClick={() => navigate(-1)} className={colors.textMuted}>
-          <ArrowLeft size={22} />
+    <div className="flex flex-col h-full overflow-y-auto pb-8">
+      {/* Hero */}
+      <div
+        className="relative px-5 pt-12 pb-8"
+        style={{
+          background: isDark
+            ? "linear-gradient(160deg, #1e1a12 0%, #1a1a1a 60%)"
+            : "linear-gradient(160deg, #fdf6e3 0%, #fafaf7 60%)",
+        }}
+      >
+        <button
+          onClick={() => navigate(-1)}
+          className={`${colors.textMuted} mb-6 flex items-center gap-1`}
+        >
+          <ArrowLeft size={20} />
         </button>
-        <h2 className={`${colors.text} text-lg`}>Choose Your Plan</h2>
-        <div className="w-6" />
-      </div>
 
-      <p className={`${colors.textMuted} text-sm text-center mb-6`}>
-        Unlock Arabic flashcard decks and start learning today. Pay securely via
-        SBP (Система быстрых платежей).
-      </p>
+        <div
+          className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4"
+          style={{ background: "linear-gradient(135deg, #c9a84c 0%, #b8943f 100%)", boxShadow: "0 8px 24px rgba(201,168,76,0.35)" }}
+        >
+          <Crown size={26} className="text-white" />
+        </div>
 
-      {/* Plans */}
-      <div className="space-y-3 mb-8">
-        {plans.map((plan) => {
-          const isSelected = selectedPlan === plan.id;
-          return (
-            <button
-              key={plan.id}
-              onClick={() => setSelectedPlan(plan.id)}
-              className={`relative w-full text-left p-4 rounded-2xl border-2 transition-all ${
-                isSelected
-                  ? `${isDark ? "bg-[#1a3a2a]" : "bg-[#e6f5ee]"}`
-                  : `${colors.card} ${!isDark ? "shadow-sm" : ""}`
+        <h1 className={`${isDark ? "text-[#f0e6d0]" : "text-[#1a1a1a]"} text-2xl font-bold mb-1`}>
+          Go Premium
+        </h1>
+        <p className={`${isDark ? "text-[#8a7d6b]" : "text-[#8a7a5a]"} text-sm max-w-[280px]`}>
+          Unlock everything and master Arabic at your own pace.
+        </p>
+
+        {/* Feature highlights */}
+        <div className="grid grid-cols-2 gap-2.5 mt-6">
+          {highlights.map((h) => (
+            <div
+              key={h.label}
+              className={`rounded-xl p-3 flex items-center gap-2.5 ${
+                isDark ? "bg-[#252218]" : "bg-white/80"
               }`}
-              style={{
-                borderColor: isSelected ? accentColor : isDark ? "#333" : "#e8e3db",
-              }}
             >
-              {plan.popular && (
-                <div
-                  className="absolute -top-2.5 right-4 px-2.5 py-0.5 rounded-full text-white text-[10px] font-semibold"
-                  style={{ backgroundColor: accentColor }}
-                >
-                  Most Popular
-                </div>
-              )}
-              <div className="flex items-start gap-3">
-                <div
-                  className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{
-                    backgroundColor: isSelected
-                      ? `${accentColor}30`
-                      : isDark
-                      ? "#333"
-                      : "#f0ebe3",
-                  }}
-                >
-                  <plan.icon
-                    size={18}
-                    style={{
-                      color: isSelected ? accentColor : isDark ? "#999" : "#888",
-                    }}
-                  />
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-baseline justify-between">
-                    <h3 className={`${colors.text} text-base`}>{plan.name}</h3>
-                    <div className="text-right">
-                      <span className={`${colors.text} text-lg font-bold`}>
-                        {plan.price}
-                      </span>
-                      <span className={`${colors.textDimmed} text-xs ml-1`}>
-                        {plan.period}
-                      </span>
-                      {plan.priceNote && (
-                        <span
-                          className="block text-[10px] font-medium"
-                          style={{ color: accentColor }}
-                        >
-                          {plan.priceNote}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <p className={`${colors.textMuted} text-xs mt-1 mb-2`}>
-                    {plan.description}
-                  </p>
-                  <ul className="space-y-1">
-                    {plan.features.map((f) => (
-                      <li
-                        key={f}
-                        className={`flex items-center gap-1.5 text-xs ${colors.textSecondary}`}
-                      >
-                        <Check
-                          size={12}
-                          style={{ color: accentColor }}
-                          className="flex-shrink-0"
-                        />
-                        {f}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+              <div
+                className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
+                style={{ backgroundColor: `${accentColor}20` }}
+              >
+                <h.icon size={15} style={{ color: accentColor }} />
               </div>
-            </button>
-          );
-        })}
+              <div>
+                <p className={`${isDark ? "text-[#e8d9a8]" : "text-[#2a2010]"} text-xs font-medium`}>{h.label}</p>
+                <p className={`${isDark ? "text-[#6b5f4e]" : "text-[#9a8a6a]"} text-[10px]`}>{h.sub}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
-      {/* Payment Methods */}
-      {selectedPlan && (
-        <>
-          <h3 className={`${colors.text} text-sm mb-3`}>Payment Method</h3>
-          <div className="grid grid-cols-2 gap-2 mb-6">
-            {paymentMethods.map((pm) => (
+      <div className="px-5 pt-6">
+        {/* Plan selector */}
+        <h2 className={`${colors.text} text-base font-semibold mb-3`}>Choose your plan</h2>
+        <div className="space-y-3 mb-6">
+          {plans.map((plan) => {
+            const isSelected = selectedPlan === plan.id;
+            return (
+              <button
+                key={plan.id}
+                onClick={() => setSelectedPlan(plan.id)}
+                className="relative w-full text-left rounded-2xl transition-all active:scale-[0.99]"
+                style={{
+                  border: `2px solid ${isSelected ? (plan.badgeColor ?? accentColor) : isDark ? "#2a2a2a" : "#e8e3db"}`,
+                  background: isSelected
+                    ? isDark ? "#1e1a12" : "#fffdf5"
+                    : isDark ? "#1a1a1a" : "#fafafa",
+                }}
+              >
+                {plan.badge && (
+                  <div
+                    className="absolute -top-2.5 right-4 px-2.5 py-0.5 rounded-full text-white text-[10px] font-semibold"
+                    style={{ backgroundColor: plan.badgeColor }}
+                  >
+                    {plan.badge}
+                  </div>
+                )}
+                <div className="p-4 flex items-center gap-3">
+                  {/* Icon */}
+                  <div
+                    className="w-11 h-11 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style={{
+                      background: isSelected ? plan.gradient : isDark ? "#252525" : "#f0ebe3",
+                    }}
+                  >
+                    <plan.icon size={19} className={isSelected ? "text-white" : ""} style={!isSelected ? { color: isDark ? "#666" : "#999" } : {}} />
+                  </div>
+
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-between">
+                      <span className={`${colors.text} text-sm font-semibold`}>{plan.name}</span>
+                      <div className="text-right">
+                        <span className={`${colors.text} text-lg font-bold`}>{plan.price}</span>
+                        <span className={`${colors.textDimmed} text-xs ml-1`}>{plan.period}</span>
+                      </div>
+                    </div>
+                    {plan.perMonth && (
+                      <p className="text-[11px] mt-0.5" style={{ color: isSelected ? (plan.badgeColor ?? accentColor) : isDark ? "#555" : "#aaa" }}>
+                        {plan.perMonth}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Check */}
+                  <div
+                    className="w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0"
+                    style={{
+                      borderColor: isSelected ? (plan.badgeColor ?? accentColor) : isDark ? "#333" : "#ddd",
+                      backgroundColor: isSelected ? (plan.badgeColor ?? accentColor) : "transparent",
+                    }}
+                  >
+                    {isSelected && <Check size={11} className="text-white" />}
+                  </div>
+                </div>
+
+                {/* Features — only when selected */}
+                {isSelected && (
+                  <div
+                    className="mx-4 mb-4 rounded-xl p-3 space-y-1.5"
+                    style={{ backgroundColor: isDark ? "#141414" : "#f5f0e8" }}
+                  >
+                    {plan.features.map((f) => (
+                      <div key={f} className="flex items-center gap-2">
+                        <Check size={11} style={{ color: plan.badgeColor ?? accentColor }} className="flex-shrink-0" />
+                        <span className={`${colors.textSecondary} text-xs`}>{f}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Payment method */}
+        <h2 className={`${colors.text} text-base font-semibold mb-3`}>Payment method</h2>
+        <div
+          className={`rounded-2xl overflow-hidden mb-6 border ${
+            isDark ? "border-[#2a2a2a]" : "border-[#e8e3db]"
+          }`}
+        >
+          {paymentMethods.map((pm, i) => {
+            const isSelected = selectedMethod === pm.id;
+            const isLast = i === paymentMethods.length - 1;
+            return (
               <button
                 key={pm.id}
                 onClick={() => pm.available && setSelectedMethod(pm.id)}
                 disabled={!pm.available}
-                className={`flex items-center gap-2 p-3 rounded-xl border transition-all ${
-                  selectedMethod === pm.id
-                    ? `${isDark ? "bg-[#1a3a2a]" : "bg-[#e6f5ee]"}`
+                className={`w-full flex items-center gap-3 px-4 py-3.5 transition-colors text-left ${
+                  !isLast ? `border-b ${isDark ? "border-[#2a2a2a]" : "border-[#e8e3db]"}` : ""
+                } ${
+                  isSelected
+                    ? isDark ? "bg-[#1e1a12]" : "bg-[#fffdf5]"
                     : pm.available
-                    ? `${colors.card} ${colors.border}`
-                    : `${isDark ? "bg-[#222]" : "bg-[#f5f0e8]"} opacity-50`
+                    ? isDark ? "bg-[#1a1a1a] hover:bg-[#1e1e1e]" : "bg-white hover:bg-[#fafafa]"
+                    : isDark ? "bg-[#161616]" : "bg-[#f9f9f9]"
                 }`}
-                style={{
-                  borderColor:
-                    selectedMethod === pm.id
-                      ? accentColor
-                      : isDark
-                      ? "#333"
-                      : "#e8e3db",
-                }}
               >
-                <pm.icon size={16} className={colors.textMuted} />
-                <div className="text-left">
-                  <span className={`text-xs ${colors.text}`}>{pm.name}</span>
-                  {!pm.available && (
-                    <span className={`block text-[10px] ${colors.textDimmed}`}>
-                      Coming soon
-                    </span>
-                  )}
-                  {pm.id === "sbp" && pm.available && (
-                    <span className="block text-[10px]" style={{ color: accentColor }}>
-                      Available now
-                    </span>
-                  )}
+                {/* Icon */}
+                <div
+                  className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+                  style={{
+                    background: isSelected
+                      ? selected.gradient
+                      : isDark ? "#252525" : "#f0ebe3",
+                  }}
+                >
+                  <pm.icon
+                    size={16}
+                    className={isSelected ? "text-white" : ""}
+                    style={!isSelected ? { color: isDark ? "#555" : "#aaa" } : {}}
+                  />
                 </div>
-              </button>
-            ))}
-          </div>
 
-          {/* CTA */}
-          {!user ? (
-            <div
-              className={`${colors.card} rounded-2xl p-5 text-center ${
-                !isDark ? "shadow-sm" : ""
-              }`}
-            >
-              <Lock size={20} className={colors.textMuted + " mx-auto mb-2"} />
-              <p className={`${colors.textSecondary} text-sm mb-3`}>
-                Sign in to complete your purchase
-              </p>
-              <button
-                onClick={signInWithGoogle}
-                className="w-full text-white py-3 rounded-xl flex items-center justify-center gap-2 text-sm"
-                style={{ backgroundColor: accentColor }}
-              >
-                <LogIn size={16} />
-                Sign in with Google
+                {/* Label */}
+                <div className="flex-1 min-w-0">
+                  <p className={`text-sm ${pm.available ? colors.text : colors.textDimmed}`}>
+                    {pm.name}
+                  </p>
+                  <p className={`text-[11px] ${isDark ? "text-[#4a4a4a]" : "text-[#bbb]"}`}>
+                    {pm.sub}
+                  </p>
+                </div>
+
+                {/* State indicator */}
+                {pm.available ? (
+                  <div
+                    className="w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0"
+                    style={{
+                      borderColor: isSelected ? (selected.badgeColor ?? accentColor) : isDark ? "#333" : "#ddd",
+                      backgroundColor: isSelected ? (selected.badgeColor ?? accentColor) : "transparent",
+                    }}
+                  >
+                    {isSelected && <Check size={11} className="text-white" />}
+                  </div>
+                ) : (
+                  <span
+                    className="text-[10px] px-2 py-0.5 rounded-full flex-shrink-0"
+                    style={{
+                      color: isDark ? "#555" : "#bbb",
+                      background: isDark ? "#252525" : "#f0ebe3",
+                    }}
+                  >
+                    Soon
+                  </span>
+                )}
               </button>
-            </div>
-          ) : (
-            <button
-              onClick={handleProceed}
-              disabled={!selectedMethod}
-              className="w-full py-3.5 rounded-2xl text-center text-white text-sm font-medium transition-all active:scale-[0.98] disabled:opacity-50"
-              style={{
-                backgroundColor: selectedMethod ? accentColor : isDark ? "#444" : "#ccc",
-              }}
-            >
-              {selectedMethod === "sbp"
-                ? `Pay ${plans.find((p) => p.id === selectedPlan)?.price} via SBP`
-                : selectedMethod
-                ? "Coming Soon"
-                : "Select a payment method"}
-            </button>
-          )}
-          <p
-            className={`text-center text-[10px] ${colors.textDimmed} mt-3 mb-6`}
+            );
+          })}
+        </div>
+
+        {/* CTA */}
+        {!user ? (
+          <div
+            className={`rounded-2xl p-5 text-center mb-4 ${
+              isDark ? "bg-[#1e1e1e] border border-[#2a2a2a]" : "bg-[#f5f5f5] border border-[#eaeaea]"
+            }`}
           >
-            Payments processed via SBP (Система быстрых платежей) to Tinkoff
-            Bank. Secure and instant.
-          </p>
-        </>
-      )}
+            <p className={`${colors.textSecondary} text-sm mb-3`}>
+              Sign in to complete your purchase
+            </p>
+            <button
+              onClick={signInWithGoogle}
+              className="w-full text-white py-3.5 rounded-xl flex items-center justify-center gap-2 text-sm font-medium active:scale-[0.98] transition-transform"
+              style={{ backgroundColor: accentColor }}
+            >
+              <LogIn size={16} />
+              Continue with Google
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => { if (selectedMethod === "sbp") setShowSBPPayment(true); }}
+            disabled={paymentMethods.find(m => m.id === selectedMethod)?.available !== true}
+            className="w-full py-4 rounded-2xl text-white text-sm font-semibold flex items-center justify-center gap-2 active:scale-[0.98] transition-transform mb-4 disabled:opacity-50"
+            style={{
+              background: selected.gradient,
+              boxShadow: `0 6px 20px ${selected.badgeColor ? selected.badgeColor + "40" : accentColor + "40"}`,
+            }}
+          >
+            <Building2 size={16} />
+            Pay {selected.price}
+            <ChevronRight size={16} />
+          </button>
+        )}
+
+        <p className={`text-center text-[11px] ${colors.textDimmed} mb-2`}>
+          Payments processed securely · ИП Обейд Е.Г. · ИНН 500315107978
+        </p>
+      </div>
     </div>
   );
 }
